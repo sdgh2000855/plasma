@@ -4985,6 +4985,174 @@ async function resolvePublicHost(config, savedHost) {
   return '127.0.0.1';
 }
 
+
+// ================= Plasma Telegram bot: admin management from Telegram =================
+// Enabled when TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_ID are set (env or plasma.env).
+// Only the admin's Telegram account can use it. Long-polling, no extra dependencies.
+function startPlasmaTelegramBot(opts) {
+  const token = process.env.TELEGRAM_BOT_TOKEN || '';
+  const adminId = String(process.env.TELEGRAM_ADMIN_ID || '').trim();
+  if (!token || !adminId) return;
+  if ((process.env.PLASMA_ROLE || '').toLowerCase() === 'node') return;
+  const config = opts.config || {};
+  const base = (process.env.BOT_PUBLIC_URL || '').replace(/\/+$/, '') ||
+    ((config.forceHttps ? 'https://' : 'http://') + opts.resolvedHost + ':' + config.publicPort);
+  const API = 'https://api.telegram.org/bot' + token + '/';
+  const GIB = 1024 * 1024 * 1024;
+  const fmtGB = (b) => {
+    b = Number(b) || 0;
+    if (b >= GIB) return (b / GIB).toFixed(2).replace(/\.?0+$/, '') + ' GB';
+    if (b >= 1048576) return Math.round(b / 1048576) + ' MB';
+    return Math.round(b / 1024) + ' KB';
+  };
+  const daysLeft = (u) => (u.expiresAt ? Math.max(0, Math.ceil((u.expiresAt - Date.now()) / 86400000)) : null);
+  const statusFa = (u) => (!u.enabled ? '🔴 غیرفعال' : (!BkUsers.isAllowed(u) ? '🔴 قطع (حجم/زمان)' : '🟢 فعال'));
+  const userText = (u) => {
+    const dl = daysLeft(u);
+    const quota = u.quotaBytes > 0 ? fmtGB(u.quotaBytes) : 'نامحدود';
+    const pct = u.quotaBytes > 0 ? Math.min(100, Math.round((u.usedBytes || 0) / u.quotaBytes * 100)) : 0;
+    return '👤 ' + u.name + '\n' +
+      'وضعیت: ' + statusFa(u) + '\n' +
+      '📊 مصرف: ' + fmtGB(u.usedBytes || 0) + ' از ' + quota + (u.quotaBytes > 0 ? ' (' + pct + '٪)' : '') + '\n' +
+      '⏳ زمان: ' + (dl === null ? 'نامحدود' : dl + ' روز مانده');
+  };
+  const mainKb = () => ({ inline_keyboard: [
+    [{ text: '📊 گزارش کلی', callback_data: 'report' }],
+    [{ text: '👥 اشتراک‌ها', callback_data: 'users' }, { text: '➕ ساخت اشتراک', callback_data: 'new' }],
+    [{ text: '🖥 وضعیت نودها', callback_data: 'nodes' }]
+  ]});
+  async function tg(method, body) {
+    const r = await fetch(API + method, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const j = await r.json().catch(() => null);
+    if (!j || !j.ok) throw new Error('Telegram ' + method + ': ' + ((j && j.description) || ('HTTP ' + r.status)));
+    return j.result;
+  }
+  const send = (chatId, text, kb) => tg('sendMessage', { chat_id: chatId, text, reply_markup: kb || mainKb() }).catch(e => Logger.warn('Telegram bot: ' + e.message));
+  const flows = new Map();
+  function showUsers(chatId) {
+    const users = BkUsers.list();
+    if (!users.length) return send(chatId, 'هنوز اشتراکی ساخته نشده.');
+    const kb = users.slice(0, 30).map(u => [{ text: u.name + ' • ' + fmtGB(u.usedBytes || 0) + (BkUsers.isAllowed(u) && u.enabled ? '' : ' 🔴'), callback_data: 'u:' + u.id }]);
+    kb.push([{ text: '🏠 منوی اصلی', callback_data: 'menu' }]);
+    return send(chatId, '👥 اشتراک‌ها (' + users.length + '):', { inline_keyboard: kb });
+  }
+  function showUser(chatId, id) {
+    const u = BkUsers.list().find(x => x.id === id);
+    if (!u) return send(chatId, 'این اشتراک دیگه وجود نداره.');
+    const kb = { inline_keyboard: [
+      [{ text: '➕ ۱۰ گیگ', callback_data: 'addgb:' + id }, { text: '➕ ۳۰ روز', callback_data: 'adddays:' + id }],
+      [{ text: '🔄 ریست مصرف', callback_data: 'reset:' + id }, { text: u.enabled ? '⏸ غیرفعال' : '▶️ فعال', callback_data: 'toggle:' + id }],
+      [{ text: '🔗 ارسال لینک اشتراک', callback_data: 'link:' + id }],
+      [{ text: '🗑 حذف', callback_data: 'del:' + id }, { text: '🔙 لیست', callback_data: 'users' }]
+    ]};
+    return send(chatId, userText(u), kb);
+  }
+  function showReport(chatId) {
+    const users = BkUsers.list();
+    const active = users.filter(u => BkUsers.isAllowed(u)).length;
+    const sumUsed = users.reduce((s, u) => s + (u.usedBytes || 0), 0);
+    let traffic = '';
+    try {
+      const snap = BkTraffic.snapshot();
+      if (snap && snap.ok) traffic = '\n📈 ترافیک کل این ماه: ' + fmtGB(snap.month.used || 0) + '\n📅 ترافیک امروز: ' + fmtGB((snap.day.total != null ? snap.day.total : (snap.day.up || 0) + (snap.day.down || 0)) || 0);
+    } catch (_) {}
+    const nodes = BkNodes.list();
+    const nodesTxt = nodes.length ? nodes.map(n => '\n🖥 ' + n.name + ' ' + (n.flag || '') + ': ' + (Date.now() - (n.lastSeen || 0) < 180000 ? '🟢 آنلاین' : '🔴 آفلاین')).join('') : '\n🖥 نودی ثبت نشده';
+    return send(chatId, '📊 گزارش Plasma\n👥 اشتراک‌ها: ' + users.length + ' (فعال: ' + active + ')\n💾 مجموع مصرف اشتراک‌ها: ' + fmtGB(sumUsed) + traffic + nodesTxt + '\n⏱ آپتایم: ' + Math.floor(process.uptime() / 60) + ' دقیقه');
+  }
+  function showNodes(chatId) {
+    const nodes = BkNodes.list();
+    if (!nodes.length) return send(chatId, '🖥 هیچ نودی ثبت نشده.\nنود فنلاند رو روشن کنی خودش اینجا میاد.');
+    const txt = nodes.map(n => '🖥 ' + n.name + ' ' + (n.flag || '') + '\nآدرس: ' + n.host + ':' + n.port + '\nوضعیت: ' + (Date.now() - (n.lastSeen || 0) < 180000 ? '🟢 آنلاین' : '🔴 آفلاین (آخرین تماس: ' + Math.round((Date.now() - (n.lastSeen || 0)) / 60000) + ' دقیقه پیش)')).join('\n\n');
+    return send(chatId, txt);
+  }
+  const changed = () => { if (opts.reloadEngines) { try { opts.reloadEngines(); } catch (_) {} } };
+  async function handleCallback(q) {
+    const chatId = q.message && q.message.chat && q.message.chat.id;
+    const data = q.data || '';
+    tg('answerCallbackQuery', { callback_query_id: q.id }).catch(() => {});
+    if (!chatId) return;
+    const [cmd, arg] = data.split(':');
+    if (cmd === 'menu') return send(chatId, 'منوی اصلی Plasma:');
+    if (cmd === 'report') return showReport(chatId);
+    if (cmd === 'users') return showUsers(chatId);
+    if (cmd === 'nodes') return showNodes(chatId);
+    if (cmd === 'new') { flows.set(chatId, { step: 'name' }); return send(chatId, '➕ ساخت اشتراک جدید\nاسم اشتراک رو بفرست (مثلاً: علی):', { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'menu' }]] }); }
+    if (cmd === 'u') return showUser(chatId, arg);
+    if (cmd === 'link') {
+      const u = BkUsers.list().find(x => x.id === arg);
+      if (u) await send(chatId, '🔗 لینک اشتراک «' + u.name + '»:\n' + base + '/u/' + u.token + '\n\nلینک Clash:\n' + base + '/u/' + u.token + '/clash');
+      return;
+    }
+    if (cmd === 'addgb') { BkUsers.update(arg, { addGB: 10 }); changed(); await send(chatId, '✅ ۱۰ گیگ اضافه شد.'); return showUser(chatId, arg); }
+    if (cmd === 'adddays') { BkUsers.update(arg, { addDays: 30 }); changed(); await send(chatId, '✅ ۳۰ روز اضافه شد.'); return showUser(chatId, arg); }
+    if (cmd === 'reset') { BkUsers.update(arg, { resetUsage: true }); changed(); await send(chatId, '✅ مصرف ریست شد.'); return showUser(chatId, arg); }
+    if (cmd === 'toggle') { const u = BkUsers.list().find(x => x.id === arg); if (u) { BkUsers.update(arg, { enabled: !u.enabled }); changed(); } return showUser(chatId, arg); }
+    if (cmd === 'del') return send(chatId, '⚠️ اشتراک حذف بشه؟ این کار برگشت نداره.', { inline_keyboard: [[{ text: '🗑 بله، حذف کن', callback_data: 'delok:' + arg }], [{ text: '🔙 برگرد', callback_data: 'u:' + arg }]] });
+    if (cmd === 'delok') { BkUsers.remove(arg); changed(); await send(chatId, '🗑 اشتراک حذف شد.'); return showUsers(chatId); }
+  }
+  async function handleMessage(msg) {
+    const chatId = msg.chat && msg.chat.id;
+    const fromId = msg.from && String(msg.from.id);
+    if (!chatId) return;
+    if (fromId !== adminId) { await send(chatId, '⛔️ این ربات خصوصیه.'); return; }
+    const text = String(msg.text || '').trim();
+    const flow = flows.get(chatId);
+    if (text === '/start' || text === '/menu') { flows.delete(chatId); return send(chatId, 'سلام 👋 به پنل مدیریت Plasma خوش اومدی.'); }
+    if (flow) {
+      if (flow.step === 'name') {
+        if (text.length < 1) return send(chatId, 'یه اسم بفرست:');
+        flow.name = text.slice(0, 60); flow.step = 'gb';
+        return send(chatId, 'حجم اشتراک چند گیگ باشه؟ (عدد بفرست، ۰ = نامحدود)', { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'menu' }]] });
+      }
+      if (flow.step === 'gb') {
+        const gb = Number(text.replace(/[^\d.]/g, ''));
+        if (!isFinite(gb) || gb < 0) return send(chatId, 'فقط عدد بفرست (۰ = نامحدود):');
+        flow.gb = gb; flow.step = 'days';
+        return send(chatId, 'مدت اشتراک چند روز باشه؟ (عدد بفرست، ۰ = نامحدود)', { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'menu' }]] });
+      }
+      if (flow.step === 'days') {
+        const days = Number(text.replace(/[^\d]/g, ''));
+        if (!isFinite(days) || days < 0) return send(chatId, 'فقط عدد بفرست (۰ = نامحدود):');
+        flows.delete(chatId);
+        const u = BkUsers.create({ name: flow.name, quotaGB: flow.gb, days });
+        changed();
+        await send(chatId, '✅ اشتراک ساخته شد!\n\n' + userText(u) + '\n\n🔗 لینک اشتراک:\n' + base + '/u/' + u.token);
+        return showUser(chatId, u.id);
+      }
+    }
+    return send(chatId, 'از منوی زیر استفاده کن:');
+  }
+  (async () => {
+    try {
+      const me = await tg('getMe', {});
+      Logger.info('Telegram bot connected: @' + (me.username || me.id));
+    } catch (e) { Logger.warn('Telegram bot: getMe failed: ' + e.message); }
+    let offset = 0;
+    for (;;) {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 70000);
+        const r = await fetch(API + 'getUpdates', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ offset, timeout: 50, allowed_updates: ['message', 'callback_query'] }), signal: ctrl.signal });
+        clearTimeout(timer);
+        const j = await r.json().catch(() => null);
+        if (!j || !j.ok) { await new Promise(res => setTimeout(res, 5000)); continue; }
+        for (const up of j.result) {
+          offset = up.update_id + 1;
+          try {
+            if (up.callback_query) {
+              if (String(up.callback_query.from.id) === adminId) await handleCallback(up.callback_query);
+            } else if (up.message) await handleMessage(up.message);
+          } catch (e) { Logger.warn('Telegram bot update error: ' + e.message); }
+        }
+      } catch (e) {
+        await new Promise(res => setTimeout(res, 5000));
+      }
+    }
+  })();
+  Logger.info('Telegram bot started (admin-only management).');
+}
+
 async function startGate(userConfig = {}) {
   // 1. Banner & notices
   Logger.banner();
@@ -5189,6 +5357,8 @@ async function startGate(userConfig = {}) {
       Logger.warn('Node agent: PLASMA_ROLE=node but NODE_MAIN_URL / PLASMA_NODE_SECRET missing; agent disabled.');
     }
   }
+
+  startPlasmaTelegramBot({ config, resolvedHost, reloadEngines });
 
   const { server: expressServer, app: expressApp } = createHttpPanel(config, stateMgr, engineStatusGetter, () => resolvedHost, { reloadEngines });
   const tcpRouter = new TcpRouter(config, allocatedPorts, expressServer, expressApp);
