@@ -1336,6 +1336,12 @@ class SingBoxEngine {
     this.process = null;
   }
 
+  /** BK_USERS: UUIDs allowed in inbounds — the default user + every active subscription user. */
+  bkUserUuids() {
+    try { const a = BkUsers.activeUuids(); if (a && a.length) return a; } catch (_) {}
+    return [this.stateManager.state.uuid];
+  }
+
   generateRealityKeys() {
     if (!(this.config.enable && this.config.enable.reality)) return;
     const state = this.stateManager.state;
@@ -1389,7 +1395,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vmessWs,
         users: [
-          { uuid: state.uuid, alterId: 0 }
+          ...this.bkUserUuids().map(u => ({ uuid: u, alterId: 0 }))
         ],
         transport: {
           type: 'ws',
@@ -1408,7 +1414,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessWs,
         users: [
-          { uuid: state.uuid, flow: '' }
+          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
         ],
         tls: { enabled: false },
         transport: {
@@ -1429,7 +1435,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessWsTls,
         users: [
-          { uuid: state.uuid, flow: '' }
+          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
         ],
         tls: {
           enabled: true,
@@ -1455,7 +1461,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessHu,
         users: [
-          { uuid: state.uuid, flow: '' }
+          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
         ],
         tls: { enabled: false },
         transport: {
@@ -1469,7 +1475,7 @@ class SingBoxEngine {
     if (enable.vmessHttpUpgrade && this.ports.vmessHu) {
       inbounds.push({
         type: 'vmess', tag: 'vmess-hu-in', listen: '127.0.0.1', listen_port: this.ports.vmessHu,
-        users: [{ uuid: state.uuid, alterId: 0 }],
+        users: this.bkUserUuids().map(u => ({ uuid: u, alterId: 0 })),
         transport: { type: 'httpupgrade', path: BK_PATHS.vmessHu }
       });
     }
@@ -1478,7 +1484,7 @@ class SingBoxEngine {
     if (enable.trojanHttpUpgrade && this.ports.trojanHu) {
       inbounds.push({
         type: 'trojan', tag: 'trojan-hu-in', listen: '127.0.0.1', listen_port: this.ports.trojanHu,
-        users: [{ password: state.uuid }],
+        users: this.bkUserUuids().map(u => ({ password: u })),
         transport: { type: 'httpupgrade', path: BK_PATHS.trojanHu }
       });
     }
@@ -1535,7 +1541,7 @@ class SingBoxEngine {
           listen: '127.0.0.1',
           listen_port: 0,
           users: [
-            { uuid: state.uuid, flow: '' }
+            ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
           ]
         }
       );
@@ -1587,7 +1593,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.trojanWs,
         users: [
-          { password: state.uuid }
+          ...this.bkUserUuids().map(u => ({ password: u }))
         ],
         transport: {
           type: 'ws',
@@ -1605,7 +1611,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.trojanGrpcTls,
         users: [
-          { password: state.uuid }
+          ...this.bkUserUuids().map(u => ({ password: u }))
         ],
         tls: {
           enabled: true,
@@ -1629,7 +1635,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessGrpc,
         users: [
-          { uuid: state.uuid, flow: '' }
+          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
         ],
         tls: { enabled: false },
         transport: {
@@ -1644,7 +1650,7 @@ class SingBoxEngine {
       ensureTlsCertificates(this.paths.certPath, this.paths.keyPath, this.config.domain || 'www.google.com');
       inbounds.push({
         type: 'vless', tag: 'vless-grpc-tls-in', listen: '127.0.0.1', listen_port: this.ports.vlessGrpcTls,
-        users: [{ uuid: state.uuid, flow: '' }],
+        users: this.bkUserUuids().map(u => ({ uuid: u, flow: '' })),
         tls: {
           enabled: true,
           server_name: this.config.domain || 'www.google.com',
@@ -1888,6 +1894,12 @@ class XrayEngine {
     this.process = null;
   }
 
+  /** BK_USERS: UUIDs allowed in inbounds — the default user + every active subscription user. */
+  bkUserUuids() {
+    try { const a = BkUsers.activeUuids(); if (a && a.length) return a; } catch (_) {}
+    return [this.stateManager.state.uuid];
+  }
+
   static xhttpPath() {
     return BK_PATHS.xhttp;
   }
@@ -1901,7 +1913,7 @@ class XrayEngine {
         listen: '127.0.0.1',
         port: this.ports.xhttp,
         protocol: 'vless',
-        settings: { clients: [{ id: state.uuid, level: 0 }], decryption: 'none' },
+        settings: { clients: this.bkUserUuids().map(u => ({ id: u, level: 0 })), decryption: 'none' },
         streamSettings: {
           network: 'xhttp',
           security: 'none', // TLS (if any) is terminated in front of Xray
@@ -3346,7 +3358,7 @@ rules:
 }
 
 // --- Module: lib/panel/http-panel.js ---
-function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostGetter) {
+function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostGetter, bkHooks = {}) {
   const app = express();
   const panelPath = config.panelPath.replace(/^\//, '') || 'knight';
 
@@ -3357,6 +3369,16 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
   app.use((req, res, next) => {
     let p = String(req.url || '').split('?')[0];
     try { p = decodeURIComponent(p); } catch (_) {}
+    // BK_USERS: per-user XHTTP path -> quota/expiry check, rewrite to canonical, meter per user.
+    let bkXhUser = null;
+    const bkXhParsed = BkUsers.parseUserPath(p);
+    if (bkXhParsed) {
+      bkXhUser = bkXhParsed.user;
+      if (!BkUsers.isAllowed(bkXhUser)) { res.statusCode = 403; return res.end(); }
+      const bkQ = String(req.url || '').split('?')[1];
+      req.url = bkXhParsed.canonical + (bkQ ? '?' + bkQ : '');
+      p = bkXhParsed.canonical;
+    }
     if (!(p === BK_XHTTP_PATH || p.startsWith(BK_XHTTP_PATH + '/'))) return next();
     const port = config.xhttpPort;
     if (!port) { res.statusCode = 404; return res.end(); }
@@ -3380,7 +3402,7 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
       res.removeHeader('X-Powered-By');
       res.writeHead(pr.statusCode, pr.statusMessage, out);
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
-      pr.on('data', (b) => BkTraffic.add('VLESS-XHTTP', 0, b.length));
+      pr.on('data', (b) => { BkTraffic.add('VLESS-XHTTP', 0, b.length); if (bkXhUser) BkUsers.addUsage(bkXhUser.id, 0, b.length); });
       pr.pipe(res);
       pr.on('error', () => { try { res.destroy(); } catch (_) {} });
     });
@@ -3389,7 +3411,7 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     });
     const bkXhDone = BkTraffic.open('VLESS-XHTTP');
     res.once('close', bkXhDone);
-    req.on('data', (b) => BkTraffic.add('VLESS-XHTTP', b.length, 0));
+    req.on('data', (b) => { BkTraffic.add('VLESS-XHTTP', b.length, 0); if (bkXhUser) BkUsers.addUsage(bkXhUser.id, b.length, 0); });
     req.pipe(up);
     req.on('error', () => { try { up.destroy(); } catch (_) {} });
     res.on('close', () => { if (!res.writableFinished) { try { up.destroy(); } catch (_) {} } });
@@ -3856,6 +3878,80 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
   // ===== BK traffic meter API (panel session only; POSTs need the X-BK-Req header -> no cross-site forms) =====
   const bkSessionOnly = (req, res, next) => (bkHasSession(req) ? next() : res.status(401).json({ ok: false, error: 'login required' }));
   const bkSameOrigin = (req, res, next) => (req.get('x-bk-req') === '1' ? next() : res.status(403).json({ ok: false, error: 'forbidden' }));
+  // ===== BK_USERS: per-user subscription links + admin API =====
+  const bkUserBundle = (user, req) => {
+    const host = getRequestHost(req);
+    const st = Object.assign({}, stateManager.state, { uuid: user.uuid });
+    const gen = new LinkGenerator(config, st, host);
+    const P = BkUsers.pathsFor(user);
+    gen.wsPath = P.ws; gen.vmessPath = P.vmess; gen.trPath = P.trojan;
+    gen.huPath = P.vlessHu; gen.vmHuPath = P.vmessHu; gen.trHuPath = P.trojanHu;
+    gen.xhPath = P.xhttp; gen.ssWsPath = P.ss; gen.grpcService = P.grpcService;
+    return gen;
+  };
+  // Plain h2c gRPC is excluded from user subs: it cannot be attributed per user.
+  // The gRPC-TLS variant (routed by service name) is included.
+  const bkUserNodes = (gen, compat) => gen.getAllNodes({ compat, allowLocalHostLinks: true }).filter(n => n.type !== 'VLESS-gRPC');
+  const bkSendUserSub = (req, res, format) => {
+    const user = BkUsers.findByToken(req.params.token);
+    if (!user || !BkUsers.isAllowed(user)) { res.status(403).type('text/plain').send('Subscription is not active (expired, over quota or disabled).'); return; }
+    const gen = bkUserBundle(user, req);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Profile-Update-Interval', '24');
+    const total = user.quotaBytes > 0 ? user.quotaBytes : 1099511627776;
+    const expire = user.expiresAt ? Math.floor(user.expiresAt / 1000) : 1893456000;
+    res.setHeader('Subscription-Userinfo', `upload=0; download=${user.usedBytes || 0}; total=${total}; expire=${expire}`);
+    if (format === 'clash') {
+      res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
+      res.send(gen.buildClashMetaYaml(bkUserNodes(gen, 'full')));
+    } else if (format === 'sb') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.send(gen.buildSingBoxClientJson(bkUserNodes(gen, 'full')));
+    } else {
+      const text = bkUserNodes(gen, 'v2ray').map(n => n.uri).join('\n');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.send(format === 'raw' ? text : Buffer.from(text).toString('base64'));
+    }
+  };
+  app.get('/u/:token', (req, res) => bkSendUserSub(req, res, 'base64'));
+  app.get('/u/:token/raw', (req, res) => bkSendUserSub(req, res, 'raw'));
+  app.get('/u/:token/clash', (req, res) => bkSendUserSub(req, res, 'clash'));
+  app.get('/u/:token/sb', (req, res) => bkSendUserSub(req, res, 'sb'));
+
+  app.get(`/${panelPath}/api/users`, bkSessionOnly, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ok: true, users: BkUsers.list().map(u => BkUsers.publicView(u)) });
+  });
+  app.post(`/${panelPath}/api/users`, bkSessionOnly, bkSameOrigin, express.json({ limit: '4kb' }), (req, res) => {
+    const b = req.body || {};
+    const u = BkUsers.create({ name: b.name, quotaGB: parseFloat(b.quotaGB) || 0, days: parseFloat(b.days) || 0 });
+    if (bkHooks.reloadEngines) bkHooks.reloadEngines();
+    res.json({ ok: true, user: BkUsers.publicView(u) });
+  });
+  app.post(`/${panelPath}/api/users/:id/update`, bkSessionOnly, bkSameOrigin, express.json({ limit: '4kb' }), (req, res) => {
+    const b = req.body || {};
+    const patch = {};
+    if (b.name !== undefined) patch.name = b.name;
+    if (b.quotaGB !== undefined) patch.quotaGB = parseFloat(b.quotaGB) || 0;
+    if (b.addDays !== undefined) patch.addDays = parseFloat(b.addDays) || 0;
+    if (b.days !== undefined) patch.days = parseFloat(b.days) || 0;
+    if (b.enabled !== undefined) patch.enabled = !!b.enabled;
+    if (b.resetUsage) patch.resetUsage = true;
+    const u = BkUsers.update(req.params.id, patch);
+    if (!u) { res.status(404).json({ ok: false, error: 'user not found' }); return; }
+    if (bkHooks.reloadEngines) bkHooks.reloadEngines();
+    res.json({ ok: true, user: BkUsers.publicView(u) });
+  });
+  app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req, res) => {
+    if (!BkUsers.remove(req.params.id)) { res.status(404).json({ ok: false, error: 'user not found' }); return; }
+    if (bkHooks.reloadEngines) bkHooks.reloadEngines();
+    res.json({ ok: true });
+  });
+  app.get(`/${panelPath}/users`, authMiddleware, (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(BK_USERS_PAGE);
+  });
+
   app.get(`/${panelPath}/api/traffic`, bkSessionOnly, (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json(BkTraffic.snapshot()); });
   app.post(`/${panelPath}/api/traffic/reset`, bkSessionOnly, bkSameOrigin, (req, res) => {
     BkTraffic.reset(); Logger.warn('Traffic counter reset from the panel.');
@@ -4092,6 +4188,247 @@ const BkTraffic = (() => {
   };
 })();
 
+// ================= BK_USERS: per-user subscriptions (traffic quota + expiry) =================
+// Each subscription user gets their own UUID and their own URL paths
+// (BK_P + tag + '/' + suffix). The gate rewrites user paths to the canonical
+// BK_PATHS before forwarding to the shared engine inbounds, meters the bytes
+// per user here, and refuses/terminates connections once a user's traffic
+// quota or expiry is reached. Engine inbounds carry every currently-allowed
+// user's UUID (see SingBoxEngine.bkUserUuids / XrayEngine.bkUserUuids), and a
+// blocked user is purged from the engines via the onBlock hook.
+const BkUsers = (() => {
+  const GIB = 1024 * 1024 * 1024;
+  const DAY = 86400000;
+  let file = null;
+  let data = { users: [] };
+  let defaultUuid = '';
+  let dirty = false;
+  let saveTimer = null;
+  let onBlock = null;
+  const live = new Map(); // userId -> Set<killFn>
+
+  const find = (id) => data.users.find(u => u.id === id) || null;
+  const findByTag = (tag) => data.users.find(u => u.tag === tag) || null;
+  const findByToken = (token) => data.users.find(u => u.token === token) || null;
+
+  function save() {
+    if (!file) return;
+    try {
+      const tmp = file + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      fs.renameSync(tmp, file);
+      dirty = false;
+    } catch (err) { Logger.warn('BkUsers: could not save users.json: ' + err.message); }
+  }
+  function saveSoon() {
+    dirty = true;
+    if (!saveTimer) {
+      saveTimer = setTimeout(() => { saveTimer = null; if (dirty) save(); }, 3000);
+      if (saveTimer.unref) saveTimer.unref();
+    }
+  }
+
+  function isAllowed(u) {
+    if (!u || !u.enabled) return false;
+    if (u.expiresAt && Date.now() >= u.expiresAt) return false;
+    if (u.quotaBytes > 0 && (u.usedBytes || 0) >= u.quotaBytes) return false;
+    return true;
+  }
+
+  function killLive(id) {
+    const set = live.get(id);
+    if (!set) return;
+    for (const kill of [...set]) { try { kill(); } catch (_) {} }
+    set.clear();
+  }
+
+  function blockTransition(u, why) {
+    Logger.warn(`BkUsers: subscription "${u.name}" (${u.tag}) blocked (${why}).`);
+    killLive(u.id);
+    saveSoon();
+    if (onBlock) { try { onBlock(u); } catch (_) {} }
+  }
+
+  function addUsage(id, up, down) {
+    const u = find(id);
+    if (!u || (!up && !down)) return;
+    const was = isAllowed(u);
+    u.usedBytes = (u.usedBytes || 0) + up + down;
+    saveSoon();
+    if (was && !isAllowed(u)) { u._wasAllowed = false; blockTransition(u, 'traffic quota reached'); }
+  }
+
+  /** Count bytes on a proxied pair (client <-> backend) for one user; mirrors BkTraffic.meter. */
+  function meter(id, client, backend) {
+    const kill = () => {
+      for (const s of [client, backend]) {
+        try { if (s.destroy) s.destroy(); } catch (_) {}
+        try { if (s.close) s.close(); } catch (_) {}
+      }
+    };
+    let set = live.get(id);
+    if (!set) { set = new Set(); live.set(id, set); }
+    set.add(kill);
+    const done = () => set.delete(kill);
+    client.on('data', (b) => addUsage(id, b.length, 0));
+    backend.on('data', (b) => addUsage(id, 0, b.length));
+    client.once('close', done);
+    backend.once('close', done);
+  }
+
+  /** Client path BK_P + tag + '/ws' -> { user, canonical: BK_P + 'ws' }; null for canonical paths. */
+  function parseUserPath(p) {
+    if (!p || !p.startsWith(BK_P)) return null;
+    const rest = p.slice(BK_P.length);
+    const slash = rest.indexOf('/');
+    if (slash <= 0) return null;
+    const u = findByTag(rest.slice(0, slash));
+    if (!u) return null;
+    return { user: u, canonical: BK_P + rest.slice(slash + 1) };
+  }
+
+  function pathsFor(u) {
+    const t = u.tag;
+    return {
+      ws: BK_P + t + '/ws',
+      vmess: BK_P + t + '/vmess',
+      trojan: BK_P + t + '/trojan',
+      vlessHu: BK_P + t + '/httpupgrade',
+      vmessHu: BK_P + t + '/vmess-hu',
+      trojanHu: BK_P + t + '/trojan-hu',
+      xhttp: BK_P + t + '/xhttp',
+      ss: BK_P + t + '/ss',
+      grpcService: BK_PATHS.grpcService + '-' + t
+    };
+  }
+
+  function publicView(u) {
+    return {
+      id: u.id, tag: u.tag, name: u.name, uuid: u.uuid, token: u.token,
+      quotaBytes: u.quotaBytes || 0,
+      usedBytes: u.usedBytes || 0,
+      expiresAt: u.expiresAt || 0, enabled: u.enabled !== false,
+      allowed: isAllowed(u), createdAt: u.createdAt || 0,
+      sub: '/u/' + u.token
+    };
+  }
+
+  return {
+    init(dataDir) {
+      file = path.join(dataDir, 'users.json');
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (parsed && Array.isArray(parsed.users)) data = parsed;
+      } catch (_) {}
+      for (const u of data.users) u._wasAllowed = isAllowed(u);
+      const t = setInterval(() => {
+        for (const u of data.users) {
+          const nowA = isAllowed(u);
+          if (u._wasAllowed && !nowA) blockTransition(u, 'expired');
+          u._wasAllowed = nowA;
+        }
+      }, 20000);
+      if (t.unref) t.unref();
+      process.once('exit', () => { try { save(); } catch (_) {} });
+      if (data.users.length) Logger.info(`BkUsers: ${data.users.length} subscription user(s) loaded.`);
+    },
+    setOnBlock(fn) { onBlock = fn; },
+    setDefaultUuid(uuid) { if (uuid) defaultUuid = uuid; },
+    isAllowed, addUsage, meter, parseUserPath, pathsFor, publicView, findByTag, findByToken,
+    list: () => data.users.slice(),
+    activeUuids() {
+      const out = [];
+      if (defaultUuid) out.push(defaultUuid);
+      for (const u of data.users) if (isAllowed(u) && !out.includes(u.uuid)) out.push(u.uuid);
+      return out;
+    },
+    create(opts) {
+      const o = opts || {};
+      const id = crypto.randomBytes(4).toString('hex');
+      const u = {
+        id, tag: 'u' + id,
+        name: String(o.name || 'user').slice(0, 60) || 'user',
+        uuid: crypto.randomUUID(),
+        token: crypto.randomBytes(18).toString('base64url'),
+        quotaBytes: o.quotaGB > 0 ? Math.round(o.quotaGB * GIB) : 0,
+        expiresAt: o.days > 0 ? Date.now() + Math.round(o.days * DAY) : 0,
+        usedBytes: 0, enabled: true, createdAt: Date.now(), _wasAllowed: true
+      };
+      data.users.push(u);
+      save();
+      Logger.info(`BkUsers: created subscription "${u.name}" (${u.tag}).`);
+      return u;
+    },
+    update(id, patch) {
+      const u = find(id);
+      if (!u) return null;
+      if (patch.name !== undefined) u.name = String(patch.name).slice(0, 60) || u.name;
+      if (patch.quotaGB !== undefined) u.quotaBytes = patch.quotaGB > 0 ? Math.round(patch.quotaGB * GIB) : 0;
+      if (patch.addDays) u.expiresAt = (u.expiresAt && u.expiresAt > Date.now() ? u.expiresAt : Date.now()) + Math.round(patch.addDays * DAY);
+      if (patch.days !== undefined) u.expiresAt = patch.days > 0 ? Date.now() + Math.round(patch.days * DAY) : 0;
+      if (patch.enabled !== undefined) u.enabled = !!patch.enabled;
+      if (patch.resetUsage) u.usedBytes = 0;
+      u._wasAllowed = isAllowed(u);
+      save();
+      return u;
+    },
+    remove(id) {
+      const i = data.users.findIndex(u => u.id === id);
+      if (i < 0) return false;
+      killLive(id);
+      data.users.splice(i, 1);
+      save();
+      return true;
+    }
+  };
+})();
+
+const BK_USERS_PAGE = `<!DOCTYPE html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>مدیریت اشتراک‌ها</title>
+<style>body{font-family:Tahoma,sans-serif;background:#0f1420;color:#e8ecf4;margin:0;padding:20px}
+.card{background:#171e2e;border:1px solid #26314a;border-radius:12px;padding:16px;margin-bottom:16px}
+input{background:#0f1420;border:1px solid #33415e;color:#fff;border-radius:8px;padding:8px;width:100%;box-sizing:border-box}
+button{background:#2f6fed;color:#fff;border:0;border-radius:8px;padding:7px 12px;cursor:pointer;margin:2px;font-family:inherit}
+button.red{background:#c0392b}
+table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #26314a;padding:8px;text-align:right;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+label{font-size:12px;color:#93a0b8}</style></head><body>
+<h2>مدیریت اشتراک‌ها</h2>
+<div class="card"><h3>اشتراک جدید</h3><div class="grid">
+<div><label>نام کاربر</label><input id="n"></div>
+<div><label>حجم (GB) — ۰ یعنی نامحدود</label><input id="g" type="number" min="0" step="any" value="10"></div>
+<div><label>مدت (روز) — ۰ یعنی بدون انقضا</label><input id="d" type="number" min="0" step="any" value="30"></div>
+</div><p><button onclick="createUser()">ساخت اشتراک</button></p></div>
+<div class="card"><table><thead><tr><th>نام</th><th>مصرف / حجم</th><th>انقضا</th><th>وضعیت</th><th>لینک</th><th>عملیات</th></tr></thead><tbody id="rows"></tbody></table></div>
+<script>
+var API = location.pathname.replace(/\/users\/?$/, '') + '/api/users';
+function H(){ return {'Content-Type':'application/json','x-bk-req':'1'}; }
+function fmtBytes(b){ if(!b) return '0 B'; var u=['B','KB','MB','GB','TB']; var i=Math.min(u.length-1, Math.floor(Math.log(b)/Math.log(1024))); return (b/Math.pow(1024,i)).toFixed(i?2:0)+' '+u[i]; }
+function fmtDate(t){ return t ? new Date(t).toLocaleString('fa-IR') : 'بدون انقضا'; }
+function load(){ fetch(API,{headers:H()}).then(function(r){return r.json();}).then(function(j){ render(j.users||[]); }); }
+function render(users){ var tb=document.getElementById('rows'); tb.innerHTML=''; if(!users.length){ tb.innerHTML='<tr><td colspan="6">هنوز اشتراکی ساخته نشده</td></tr>'; return; } users.forEach(function(u){ var tr=document.createElement('tr');
+ var sub = location.origin + u.sub;
+ var status = !u.enabled ? 'غیرفعال' : (u.allowed ? 'فعال' : 'تمام‌شده');
+ tr.innerHTML = '<td></td><td></td><td></td><td></td><td></td><td></td>';
+ tr.children[0].textContent = u.name;
+ tr.children[1].textContent = fmtBytes(u.usedBytes) + ' / ' + (u.quotaBytes ? fmtBytes(u.quotaBytes) : 'نامحدود');
+ tr.children[2].textContent = fmtDate(u.expiresAt);
+ tr.children[3].textContent = status;
+ var a=document.createElement('a'); a.href=sub; a.textContent='اشتراک'; a.style.color='#7aa7ff'; tr.children[4].appendChild(a);
+ var c=tr.children[5];
+ c.appendChild(btn('کپی لینک', function(){ navigator.clipboard.writeText(sub); }));
+ c.appendChild(btn('تمدید ۳۰ روز', function(){ post(u.id+'/update',{addDays:30}); }));
+ c.appendChild(btn('ریست مصرف', function(){ if(confirm('مصرف این اشتراک صفر شود؟')) post(u.id+'/update',{resetUsage:true}); }));
+ c.appendChild(btn(u.enabled?'غیرفعال':'فعال', function(){ post(u.id+'/update',{enabled:!u.enabled}); }));
+ c.appendChild(btn('حذف', function(){ if(confirm('این اشتراک حذف شود؟')) post(u.id+'/delete',{}); }, 'red'));
+ tb.appendChild(tr); }); }
+function btn(t,f,cls){ var b=document.createElement('button'); b.textContent=t; if(cls)b.className=cls; b.onclick=f; return b; }
+function post(path, body){ fetch(API+'/'+path,{method:'POST',headers:H(),body:JSON.stringify(body||{})}).then(function(){ load(); }); }
+function createUser(){ var name=document.getElementById('n').value; var g=parseFloat(document.getElementById('g').value)||0; var d=parseFloat(document.getElementById('d').value)||0; fetch(API,{method:'POST',headers:H(),body:JSON.stringify({name:name,quotaGB:g,days:d})}).then(function(){ document.getElementById('n').value=''; load(); }); }
+load();
+</script></body></html>`;
+
 class TcpRouter {
   constructor(config, targetPorts, expressServer, expressApp) {
     this.config = config;
@@ -4145,6 +4482,21 @@ class TcpRouter {
 
       let url = req.url || '';
       try { url = decodeURIComponent(url.split('?')[0]); } catch (_) { url = url.split('?')[0]; }
+      // BK_USERS: per-user subscription path -> quota/expiry check, rewrite to the canonical path.
+      let bkUser = null;
+      let bkFwdUrl = req.url;
+      const bkParsed = BkUsers.parseUserPath(url);
+      if (bkParsed) {
+        bkUser = bkParsed.user;
+        if (!BkUsers.isAllowed(bkUser)) {
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        url = bkParsed.canonical;
+        const bkQ = String(req.url || '').split('?')[1];
+        bkFwdUrl = url + (bkQ ? '?' + bkQ : '');
+      }
       // BK_PROTOCOLS_APPLIED: exact path routing (longest path first, so ".../vmess-hu" never matches ".../vmess").
       const pp = this.config.panelPath;
       const routes = [
@@ -4181,7 +4533,7 @@ class TcpRouter {
         backend.setKeepAlive(true, 10000);
         backend.setNoDelay(true);
 
-        let headersStr = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+        let headersStr = `${req.method} ${bkFwdUrl} HTTP/${req.httpVersion}\r\n`;
         for (let i = 0; i < req.rawHeaders.length; i += 2) {
           headersStr += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
         }
@@ -4194,6 +4546,7 @@ class TcpRouter {
 
         BkTraffic.add(label, head && head.length ? head.length : 0, 0);
         BkTraffic.meter(label, socket, backend);
+        if (bkUser) BkUsers.meter(bkUser.id, socket, backend);
         socket.pipe(backend);
         backend.pipe(socket);
       });
@@ -4290,13 +4643,22 @@ class TcpRouter {
     this.h2Server.on('stream', (stream, headers) => {
       stream.on('error', () => {});
       const p = String(headers[':path'] || '/');
+      // BK_USERS: per-user gRPC service names (<grpcService>-<tag>) -> quota check + canonical rewrite.
+      let bkGrpcUser = null;
+      let bkFwdPath = p;
+      const bkSvc = p.split('/')[1] || '';
+      if (bkSvc.startsWith(BK_PATHS.grpcService + '-')) {
+        bkGrpcUser = BkUsers.findByTag(bkSvc.slice(BK_PATHS.grpcService.length + 1));
+        if (!bkGrpcUser || !BkUsers.isAllowed(bkGrpcUser)) { try { stream.close(http2.constants.NGHTTP2_REFUSED_STREAM); } catch (_) {} return; }
+        bkFwdPath = '/' + BK_PATHS.grpcService + p.slice(1 + bkSvc.length);
+      }
       const fwd = {};
       for (const k of Object.keys(headers)) if (!k.startsWith(':') && !HOP.has(k)) fwd[k] = headers[k];
 
-      if (p.startsWith(grpcPrefix)) {
+      if (p.startsWith(grpcPrefix) || bkGrpcUser) {
         let up;
         try {
-          up = backendFor(stream.session).request({ ...fwd, ':method': headers[':method'] || 'POST', ':path': p, ':scheme': 'http', ':authority': headers[':authority'] || '127.0.0.1', te: 'trailers' }, { endStream: false });
+          up = backendFor(stream.session).request({ ...fwd, ':method': headers[':method'] || 'POST', ':path': bkFwdPath, ':scheme': 'http', ':authority': headers[':authority'] || '127.0.0.1', te: 'trailers' }, { endStream: false });
         } catch (_) { try { stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR); } catch (__) {} return; }
         let trailers = null;
         up.on('error', () => { try { stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR); } catch (_) {} });
@@ -4305,6 +4667,7 @@ class TcpRouter {
           for (const k of Object.keys(rh)) if (!k.startsWith(':') && !HOP.has(k)) out[k] = rh[k];
           try { stream.respond(out, { waitForTrailers: true }); } catch (_) { return; }
           BkTraffic.meter('VLESS-gRPC', stream, up);
+          if (bkGrpcUser) BkUsers.meter(bkGrpcUser.id, stream, up);
           up.pipe(stream);
         });
         up.on('trailers', (t) => { trailers = t; });
@@ -4546,6 +4909,8 @@ async function startGate(userConfig = {}) {
   // 3. Persistent state
   const stateMgr = new StateManager(config.paths, config);
   const state = stateMgr.loadOrCreate();
+  BkUsers.init(config.paths.dataDir);
+  BkUsers.setDefaultUuid(state.uuid);
   Logger.item('UUID', bkMask(state.uuid) + (process.env.UUID || process.env.SB_UUID ? ' (from env)' : ' (saved/generated; set UUID to pin it)'));
 
   // 4. Resolve host / IP
@@ -4635,7 +5000,35 @@ async function startGate(userConfig = {}) {
     argo: !!(argoInstance && argoInstance.process && !argoInstance.process.killed)
   });
 
-  const { server: expressServer, app: expressApp } = createHttpPanel(config, stateMgr, engineStatusGetter, () => resolvedHost);
+  // BK_USERS: rebuild engines whenever the set of allowed subscription UUIDs changes
+  // (user created/deleted, quota or expiry state changed). Debounced; a few seconds of
+  // engine downtime at most, and the router keeps blocking blocked users in the meantime.
+  let bkReloadTimer = null;
+  const reloadEngines = () => {
+    if (bkReloadTimer) return;
+    bkReloadTimer = setTimeout(() => {
+      bkReloadTimer = null;
+      try {
+        if (hasSingBox) {
+          if (singboxInstance) singboxInstance.stop();
+          singboxInstance = new SingBoxEngine(config, stateMgr, allocatedPorts);
+          singboxInstance.start();
+        }
+      } catch (e) { Logger.warn('BK_USERS: sing-box reload failed: ' + e.message); }
+      try {
+        if (hasXray && (allocatedPorts.xray || allocatedPorts.ssWs)) {
+          if (xrayInstance) xrayInstance.stop();
+          const xi = new XrayEngine(config, stateMgr, { xhttp: allocatedPorts.xray, ssWs: allocatedPorts.ssWs });
+          xrayInstance = xi;
+          if (xi.start()) { config.xhttpPort = allocatedPorts.xray || null; config.ssWsPort = allocatedPorts.ssWs || null; }
+        }
+      } catch (e) { Logger.warn('BK_USERS: Xray reload failed: ' + e.message); }
+    }, 500);
+    if (bkReloadTimer.unref) bkReloadTimer.unref();
+  };
+  BkUsers.setOnBlock(() => reloadEngines());
+
+  const { server: expressServer, app: expressApp } = createHttpPanel(config, stateMgr, engineStatusGetter, () => resolvedHost, { reloadEngines });
   const tcpRouter = new TcpRouter(config, allocatedPorts, expressServer, expressApp);
   await tcpRouter.start();
 
