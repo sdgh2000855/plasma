@@ -3760,7 +3760,7 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     const engines = engineStatusGetter ? engineStatusGetter() : {};
     const host = getRequestHost(req);
     const linkGen = new LinkGenerator(config, stateManager.state, host);
-    const allNodes = linkGen.getAllNodes({ compat: 'full', allowLocalHostLinks: true });
+    const allNodes = bkCollectNodes(req, null, 'full');
     const location = await resolveLocation(host);
 
     res.json({
@@ -3805,36 +3805,99 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
   const bkSessionOnly = (req, res, next) => (bkHasSession(req) ? next() : res.status(401).json({ ok: false, error: 'login required' }));
   const bkSameOrigin = (req, res, next) => (req.get('x-bk-req') === '1' ? next() : res.status(403).json({ ok: false, error: 'forbidden' }));
   // ===== BK_USERS: per-user subscription links + admin API =====
-  const bkUserBundle = (user, req) => {
-    const host = getRequestHost(req);
-    const st = Object.assign({}, stateManager.state, { uuid: user.uuid });
+  // ===== Plasma multi-location: location labels, per-endpoint generators, node API =====
+  const BK_LOC = { name: process.env.LOC_NAME || 'Germany', flag: process.env.LOC_FLAG || '\u{1F1E9}\u{1F1EA}' };
+  const bkLocLabel = (l) => ((l && l.name) || 'Node') + ' ' + ((l && l.flag) || '');
+  const bkGenFor = (req, user, endpoint) => {
+    const host = endpoint ? endpoint.host : getRequestHost(req);
+    const st = user ? Object.assign({}, stateManager.state, { uuid: user.uuid }) : stateManager.state;
     const gen = new LinkGenerator(config, st, host);
-    const P = BkUsers.pathsFor(user);
-    gen.wsPath = P.ws; gen.vmessPath = P.vmess; gen.trPath = P.trojan;
-    gen.huPath = P.vlessHu; gen.vmHuPath = P.vmessHu; gen.trHuPath = P.trojanHu;
-    gen.xhPath = P.xhttp; gen.ssWsPath = P.ss; gen.grpcService = P.grpcService;
+    if (endpoint) {
+      gen.host = endpoint.host;
+      gen.port = endpoint.port;
+      try { gen.tlsOpt = LinkGenerator.tlsOptions(endpoint.host); } catch (_) {}
+      gen.pcs = '';
+      gen.keepAllowInsecure = true;
+    }
+    if (user) {
+      const P = BkUsers.pathsFor(user);
+      gen.wsPath = P.ws; gen.vmessPath = P.vmess; gen.trPath = P.trojan;
+      gen.huPath = P.vlessHu; gen.vmHuPath = P.vmessHu; gen.trHuPath = P.trojanHu;
+      gen.xhPath = P.xhttp; gen.ssWsPath = P.ss; gen.grpcService = P.grpcService;
+    }
     return gen;
   };
-  // Plain h2c gRPC is excluded from user subs: it cannot be attributed per user.
-  // The gRPC-TLS variant (routed by service name) is included.
-  const bkUserNodes = (gen, compat) => gen.getAllNodes({ compat, allowLocalHostLinks: true }).filter(n => n.type !== 'VLESS-gRPC');
+  const bkRenameLoc = (nodes, label) => {
+    for (const n of nodes) {
+      if (!n || !n.name) continue;
+      const nn = n.name.replace(/^Plasma - /, 'Plasma - ' + label + ' - ');
+      if (n.uri && n.uri.includes('#')) n.uri = n.uri.slice(0, n.uri.indexOf('#') + 1) + urlSafeEncode(nn);
+      if (n.uri && n.uri.startsWith('vmess://')) {
+        try {
+          const j = JSON.parse(Buffer.from(n.uri.slice(8), 'base64').toString('utf8'));
+          if (j && typeof j === 'object') { j.ps = nn; n.uri = 'vmess://' + Buffer.from(JSON.stringify(j), 'utf8').toString('base64'); }
+        } catch (_) {}
+      }
+      if (n.clash) n.clash.name = nn;
+      if (Array.isArray(n.singboxOutbound)) {
+        for (const o of n.singboxOutbound) if (o && o.tag) o.tag = nn;
+        n.singboxJson = JSON.stringify(n.singboxOutbound, null, 2);
+      }
+      n.name = nn;
+    }
+    return nodes;
+  };
+  const bkCollectNodes = (req, user, compat) => {
+    let out = bkRenameLoc(bkGenFor(req, user, null).getAllNodes({ compat, allowLocalHostLinks: true }), bkLocLabel(BK_LOC));
+    let remotes = [];
+    try { remotes = BkNodes.fresh(); } catch (_) {}
+    for (const nd of remotes) {
+      try { out = out.concat(bkRenameLoc(bkGenFor(req, user, nd).getAllNodes({ compat, allowLocalHostLinks: true }), bkLocLabel(nd))); } catch (_) {}
+    }
+    if (user) out = out.filter(n => n.type !== 'VLESS-gRPC');
+    return out;
+  };
+  // Node control API (shared secret): nodes register, pull the user bundle, report usage.
+  const BK_NODE_SECRET = process.env.PLASMA_NODE_SECRET || '';
+  const bkNodeAuth = (req, res, next) => {
+    if (!BK_NODE_SECRET || req.get('x-node-secret') !== BK_NODE_SECRET) return res.status(401).json({ ok: false, error: 'node auth' });
+    next();
+  };
+  app.post('/api/node/register', bkNodeAuth, express.json({ limit: '16kb' }), (req, res) => {
+    const b = req.body || {};
+    const nd = BkNodes.register({ id: String(b.id || '').slice(0, 64), name: String(b.name || 'Node').slice(0, 40), flag: String(b.flag || '').slice(0, 8), host: String(b.host || '').slice(0, 120), port: parseInt(b.port, 10) || 0 });
+    res.json({ ok: !!nd });
+  });
+  app.get('/api/node/bundle', bkNodeAuth, (req, res) => {
+    res.json({ ok: true, mainUuid: stateManager.state.uuid, users: BkUsers.list().map(u => ({ id: u.id, tag: u.tag, name: u.name, uuid: u.uuid, token: u.token, quotaBytes: u.quotaBytes || 0, usedBytes: u.usedBytes || 0, expiresAt: u.expiresAt || 0, enabled: u.enabled !== false, createdAt: u.createdAt || 0 })) });
+  });
+  app.post('/api/node/usage', bkNodeAuth, express.json({ limit: '64kb' }), (req, res) => {
+    const d = (req.body && req.body.deltas) || {};
+    let applied = 0;
+    for (const id of Object.keys(d)) {
+      const b = Math.floor(Number(d[id]) || 0);
+      if (b > 0 && BkUsers.find(id)) { BkUsers.addUsage(id, b, 0); applied += b; }
+    }
+    res.json({ ok: true, applied });
+  });
   const bkSendUserSub = (req, res, format) => {
     const user = BkUsers.findByToken(req.params.token);
     if (!user || !BkUsers.isAllowed(user)) { res.status(403).type('text/plain').send('Subscription is not active (expired, over quota or disabled).'); return; }
-    const gen = bkUserBundle(user, req);
+    const builder = bkGenFor(req, user, null);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Profile-Update-Interval', '24');
+    res.setHeader('profile-title', 'base64:' + Buffer.from(String(user.name || 'Plasma'), 'utf8').toString('base64'));
     const total = user.quotaBytes > 0 ? user.quotaBytes : 1099511627776;
     const expire = user.expiresAt ? Math.floor(user.expiresAt / 1000) : 1893456000;
     res.setHeader('Subscription-Userinfo', `upload=0; download=${user.usedBytes || 0}; total=${total}; expire=${expire}`);
     if (format === 'clash') {
       res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
-      res.send(gen.buildClashMetaYaml(bkUserNodes(gen, 'full')));
+      res.send(builder.buildClashMetaYaml(bkCollectNodes(req, user, 'full')));
     } else if (format === 'sb') {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.send(gen.buildSingBoxClientJson(bkUserNodes(gen, 'full')));
+      res.send(builder.buildSingBoxClientJson(bkCollectNodes(req, user, 'full')));
     } else {
-      const text = bkUserNodes(gen, 'v2ray').map(n => n.uri).join('\n');
+      const text = bkCollectNodes(req, user, 'v2ray').map(n => n.uri).filter(Boolean).join('\n');
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.send(format === 'raw' ? text : Buffer.from(text).toString('base64'));
     }
@@ -3921,10 +3984,7 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
 
     const linkGen = new LinkGenerator(config, stateManager.state, host);
     const allowLocal = Boolean(config.allowLocalHostLinks || host === '127.0.0.1' || host === 'localhost');
-    const nodes = linkGen.getAllNodes({
-      compat: compatMode,
-      allowLocalHostLinks: allowLocal
-    });
+    const nodes = bkCollectNodes(req, null, compatMode);
 
     const links = nodes.map(n => n.uri);
     const text = links.join('\n');
@@ -3933,6 +3993,7 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', 'inline; filename="Plasma.txt"');
     res.setHeader('Profile-Update-Interval', '24');
+    res.setHeader('profile-title', 'base64:' + Buffer.from('Plasma', 'utf8').toString('base64'));
     // Set 1 TB total traffic and future expiry (v2rayNG rejects total=0 as expired quota)
     res.setHeader('Subscription-Userinfo', 'upload=1073741824; download=2147483648; total=1099511627776; expire=1893456000');
 
@@ -3947,13 +4008,14 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
   app.get([`/${panelPath}/clash`, `/${panelPath}/clash.yaml`, '/clash'], authMiddleware, (req, res) => {
     const host = getRequestHost(req);
     const linkGen = new LinkGenerator(config, stateManager.state, host);
-    const nodes = linkGen.getAllNodes({ compat: 'full', allowLocalHostLinks: true });
+    const nodes = bkCollectNodes(req, null, 'full');
     const yaml = linkGen.buildClashMetaYaml(nodes);
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
     res.setHeader('Content-Disposition', 'inline; filename="Plasma.yaml"');
     res.setHeader('Profile-Update-Interval', '24');
+    res.setHeader('profile-title', 'base64:' + Buffer.from('Plasma', 'utf8').toString('base64'));
     res.send(yaml);
   });
 
@@ -3962,10 +4024,11 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
     const isBase64 = req.path.endsWith('/base64');
     const host = getRequestHost(req);
     const linkGen = new LinkGenerator(config, stateManager.state, host);
-    const nodes = linkGen.getAllNodes({ compat: 'full', allowLocalHostLinks: true });
+    const nodes = bkCollectNodes(req, null, 'full');
     const jsonStr = linkGen.buildSingBoxClientJson(nodes);
 
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('profile-title', 'base64:' + Buffer.from('Plasma', 'utf8').toString('base64'));
     res.setHeader('Content-Type', isBase64 ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8');
     if (isBase64) {
       res.send(Buffer.from(jsonStr).toString('base64'));
@@ -4152,6 +4215,7 @@ const BkUsers = (() => {
   let dirty = false;
   let saveTimer = null;
   let onBlock = null;
+  let onUsage = null;
   const live = new Map(); // userId -> Set<killFn>
 
   const find = (id) => data.users.find(u => u.id === id) || null;
@@ -4201,6 +4265,7 @@ const BkUsers = (() => {
     if (!u || (!up && !down)) return;
     const was = isAllowed(u);
     u.usedBytes = (u.usedBytes || 0) + up + down;
+    if (onUsage) { try { onUsage(u.id, up + down); } catch (_) {} }
     saveSoon();
     if (was && !isAllowed(u)) { u._wasAllowed = false; blockTransition(u, 'traffic quota reached'); }
   }
@@ -4280,9 +4345,31 @@ const BkUsers = (() => {
       if (data.users.length) Logger.info(`BkUsers: ${data.users.length} subscription user(s) loaded.`);
     },
     setOnBlock(fn) { onBlock = fn; },
+    setOnUsage(fn) { onUsage = fn; },
     setDefaultUuid(uuid) { if (uuid) defaultUuid = uuid; },
-    isAllowed, addUsage, meter, parseUserPath, pathsFor, publicView, findByTag, findByToken,
+    isAllowed, addUsage, meter, parseUserPath, pathsFor, publicView, find, findByTag, findByToken,
     list: () => data.users.slice(),
+    syncFrom(remoteUsers, mainUuid, pending) {
+      const pend = pending || {};
+      const sig = () => [defaultUuid].concat(data.users.filter(isAllowed).map(u => u.uuid)).join(',');
+      const before = sig();
+      const oldAllowed = new Map(data.users.filter(isAllowed).map(u => [u.id, u]));
+      data.users = (remoteUsers || []).map(u => ({
+        id: u.id, tag: u.tag, name: u.name, uuid: u.uuid, token: u.token || '',
+        quotaBytes: u.quotaBytes || 0,
+        usedBytes: (u.usedBytes || 0) + (pend[u.id] || 0),
+        expiresAt: u.expiresAt || 0, enabled: u.enabled !== false,
+        createdAt: u.createdAt || 0, _wasAllowed: true
+      }));
+      for (const u of data.users) u._wasAllowed = isAllowed(u);
+      if (mainUuid) defaultUuid = mainUuid;
+      for (const [id, ou] of oldAllowed) {
+        const nu = find(id);
+        if (!nu || !isAllowed(nu)) killLive(id);
+      }
+      save();
+      return before !== sig();
+    },
     activeUuids() {
       const out = [];
       if (defaultUuid) out.push(defaultUuid);
@@ -4328,6 +4415,40 @@ const BkUsers = (() => {
       save();
       return true;
     }
+  };
+})();
+
+// ===== BkNodes: registry of remote Plasma nodes (main panel side) =====
+const BkNodes = (() => {
+  let file = null;
+  let data = { nodes: [] };
+  function save() {
+    if (!file) return;
+    try {
+      const tmp = file + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      fs.renameSync(tmp, file);
+    } catch (err) { Logger.warn('BkNodes: could not save nodes.json: ' + err.message); }
+  }
+  return {
+    init(dataDir) {
+      file = path.join(dataDir, 'nodes.json');
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (parsed && Array.isArray(parsed.nodes)) data = parsed;
+      } catch (_) {}
+      if (data.nodes.length) Logger.info(`BkNodes: ${data.nodes.length} remote node(s) known.`);
+    },
+    register(n) {
+      if (!n || !n.id || !n.host || !n.port) return null;
+      const rec = { id: n.id, name: n.name || 'Node', flag: n.flag || '', host: n.host, port: n.port, lastSeen: Date.now() };
+      const i = data.nodes.findIndex(x => x.id === rec.id);
+      if (i >= 0) data.nodes[i] = rec; else data.nodes.push(rec);
+      save();
+      return rec;
+    },
+    list: () => data.nodes.slice(),
+    fresh: () => data.nodes.filter(n => Date.now() - (n.lastSeen || 0) < 180000)
   };
 })();
 
@@ -4880,6 +5001,7 @@ async function startGate(userConfig = {}) {
   const state = stateMgr.loadOrCreate();
   BkUsers.init(config.paths.dataDir);
   BkUsers.setDefaultUuid(state.uuid);
+  BkNodes.init(config.paths.dataDir);
   Logger.item('UUID', bkMask(state.uuid) + (process.env.UUID || process.env.SB_UUID ? ' (from env)' : ' (saved/generated; set UUID to pin it)'));
 
   // 4. Resolve host / IP
@@ -4996,6 +5118,59 @@ async function startGate(userConfig = {}) {
     if (bkReloadTimer.unref) bkReloadTimer.unref();
   };
   BkUsers.setOnBlock(() => reloadEngines());
+
+  // ===== Plasma node agent: this instance acts as a remote node of a main panel =====
+  if ((process.env.PLASMA_ROLE || '').toLowerCase() === 'node') {
+    const nodeMain = (process.env.NODE_MAIN_URL || '').replace(/\/+$/, '');
+    const nodeSecret = process.env.PLASMA_NODE_SECRET || '';
+    if (nodeMain && nodeSecret) {
+      const nodeIdFile = path.join(config.paths.dataDir, 'node-id.txt');
+      let nodeId = '';
+      try { nodeId = fs.readFileSync(nodeIdFile, 'utf8').trim(); } catch (_) {}
+      if (!nodeId) { nodeId = crypto.randomBytes(8).toString('hex'); try { fs.writeFileSync(nodeIdFile, nodeId); } catch (_) {} }
+      const nodeName = process.env.NODE_NAME || 'Finland';
+      const nodeFlag = process.env.NODE_FLAG || '\u{1F1EB}\u{1F1EE}';
+      const nodeHost = process.env.NODE_PUBLIC_HOST || resolvedHost;
+      const nodePort = parseInt(process.env.NODE_PUBLIC_PORT || '', 10) || config.publicPort;
+      const pending = {};
+      BkUsers.setOnUsage((id, bytes) => { pending[id] = (pending[id] || 0) + bytes; });
+      const nodeHeaders = { 'x-node-secret': nodeSecret, 'content-type': 'application/json' };
+      const nodeCall = async (method, route, body) => {
+        const r = await fetch(nodeMain + route, { method, headers: nodeHeaders, body: body ? JSON.stringify(body) : undefined });
+        if (!r.ok) throw new Error('main panel HTTP ' + r.status);
+        return r.json().catch(() => ({}));
+      };
+      const nodeRegister = () => nodeCall('POST', '/api/node/register', { id: nodeId, name: nodeName, flag: nodeFlag, host: nodeHost, port: nodePort }).catch(e => Logger.warn('Node agent: register failed: ' + e.message));
+      const nodePull = async () => {
+        try {
+          const j = await nodeCall('GET', '/api/node/bundle');
+          if (j && Array.isArray(j.users)) {
+            const changed = BkUsers.syncFrom(j.users, j.mainUuid, pending);
+            if (changed) { Logger.info('Node agent: user bundle updated from main panel; reloading engines.'); reloadEngines(); }
+          }
+        } catch (e) { Logger.warn('Node agent: bundle pull failed: ' + e.message); }
+      };
+      const nodeReport = async () => {
+        const ids = Object.keys(pending).filter(id => pending[id] > 0);
+        if (!ids.length) return;
+        const snap = {};
+        for (const id of ids) snap[id] = pending[id];
+        try {
+          await nodeCall('POST', '/api/node/usage', { deltas: snap });
+          for (const id of ids) { pending[id] -= snap[id]; if (pending[id] <= 0) delete pending[id]; }
+        } catch (e) { Logger.warn('Node agent: usage report failed: ' + e.message); }
+      };
+      Logger.section('Plasma Node');
+      Logger.item('Main panel', nodeMain);
+      Logger.item('Location', nodeName + ' ' + nodeFlag);
+      const t0 = setTimeout(() => { nodeRegister(); nodePull(); }, 4000); if (t0.unref) t0.unref();
+      const t1 = setInterval(nodeRegister, 60000); if (t1.unref) t1.unref();
+      const t2 = setInterval(nodePull, 30000); if (t2.unref) t2.unref();
+      const t3 = setInterval(nodeReport, 45000); if (t3.unref) t3.unref();
+    } else {
+      Logger.warn('Node agent: PLASMA_ROLE=node but NODE_MAIN_URL / PLASMA_NODE_SECRET missing; agent disabled.');
+    }
+  }
 
   const { server: expressServer, app: expressApp } = createHttpPanel(config, stateMgr, engineStatusGetter, () => resolvedHost, { reloadEngines });
   const tcpRouter = new TcpRouter(config, allocatedPorts, expressServer, expressApp);
