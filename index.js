@@ -9,6 +9,24 @@
  */
 
 
+// ===== Plasma settings file (for hosts with no environment-variable editor) =====
+// Create a file named "plasma.env" next to index.js with KEY=VALUE lines, e.g.:
+//   PLASMA_NODE_SECRET=mysecret
+// Real environment variables, when set, take precedence over the file.
+try {
+  const _pfs = require('fs'), _pp = require('path');
+  for (const _pf of [_pp.join(process.cwd(), 'plasma.env'), _pp.join(__dirname, 'plasma.env')]) {
+    if (_pfs.existsSync(_pf)) {
+      for (const _line of _pfs.readFileSync(_pf, 'utf8').split(/\r?\n/)) {
+        const _m = _line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+        if (_m && process.env[_m[1]] === undefined) process.env[_m[1]] = _m[2].replace(/^["']|["']$/g, '');
+      }
+      console.log('[i] Loaded settings from ' + _pf);
+      break;
+    }
+  }
+} catch (_) {}
+
 // ========== PLASMA — EDIT ME ==========
 const BK_CONFIG = {
   brand: "Plasma",
