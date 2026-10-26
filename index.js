@@ -4615,7 +4615,7 @@ function linkRow(url, label){
   fmt.appendChild(btn('Sing-box', function(){ copyText(SUBS.sb); }, 'soft'));
   c1.appendChild(fmt);
   var all=el('button','green','کپی همه کانفیگ‌ها');
-  all.onclick=function(){ copyText(CFGS.map(function(c){ return c.uri; }).join('\n')); };
+  all.onclick=function(){ copyText(CFGS.map(function(c){ return c.uri; }).join('\\n')); };
   c1.appendChild(all);
   z.appendChild(c1);
   if(CFGS.length){
@@ -4743,7 +4743,7 @@ label{font-size:12px;color:#93a0b8;display:block;margin-bottom:5px}
 <div id="toast">کپی شد!</div>
 <div id="qrM"><div class="box"><div class="t" id="qrT"></div><img id="qrI" width="230" height="230" alt="QR"><div style="margin-top:14px"><button class="soft" onclick="closeQr()">بستن</button></div></div></div>
 <script>
-var PREFIX = location.pathname.replace(/\/users\/?$/, '');
+var PREFIX = location.pathname.replace(/\\/users\\/?$/, '');
 var API = PREFIX + '/api/users';
 var OVERVIEW = PREFIX + '/api/overview';
 document.getElementById('backLink').href = PREFIX || '/';
