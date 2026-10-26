@@ -3724,19 +3724,19 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     const reqHost = normalizeHost(String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0]);
     // A Cloudflare Worker relay sets X-Forwarded-Host: <worker host>; the private *.replit.dev dev URL is never used.
     const reqOk = !!(reqHost && !isIpLiteral(reqHost) && reqHost !== 'localhost' && !reqHost.endsWith('.railway.internal') && !reqHost.endsWith('.replit.dev'));
-    const savedRelay = (stateManager.state.publicHost && !bkIsPlatformHost(stateManager.state.publicHost)) ? stateManager.state.publicHost : '';
+    const savedRelay = (stateManager.state.publicHost && !bkIsPlatformHost(stateManager.state.publicHost) && bkSavedHostAllowed(config, stateManager.state.publicHost)) ? stateManager.state.publicHost : '';
     if (savedRelay && (!reqOk || bkIsPlatformHost(reqHost))) return savedRelay; // relay / custom domain learned earlier beats the platform domain
     if (config.domain && (!reqOk || reqHost === config.domain || bkIsPlatformHost(reqHost))) return config.domain;
     if (reqOk) {
       // All callers sit behind authMiddleware, so only real panel/subscription visits get here.
-      if (stateManager.state.publicHost !== reqHost) {
+      if (bkSavedHostAllowed(config, reqHost) && stateManager.state.publicHost !== reqHost) {
         stateManager.state.publicHost = reqHost;
         stateManager.save();
         Logger.info(`Public domain learned from request Host: ${reqHost} (saved; used for links, no redeploy needed)`);
       }
       return reqHost;
     }
-    if (stateManager.state.publicHost) return stateManager.state.publicHost;
+    if (stateManager.state.publicHost && bkSavedHostAllowed(config, stateManager.state.publicHost)) return stateManager.state.publicHost;
     if (resolvedHostGetter) {
       const h = resolvedHostGetter();
       if (h && h !== '127.0.0.1') return h;
@@ -3917,9 +3917,12 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Profile-Update-Interval', '24');
     res.setHeader('profile-title', 'base64:' + Buffer.from(String(user.name || 'Plasma'), 'utf8').toString('base64'));
-    const total = user.quotaBytes > 0 ? user.quotaBytes : 1099511627776;
-    const expire = user.expiresAt ? Math.floor(user.expiresAt / 1000) : 1893456000;
-    res.setHeader('Subscription-Userinfo', `upload=0; download=${user.usedBytes || 0}; total=${total}; expire=${expire}`);
+    // True unlimited: omit total/expire entirely when there is no quota/expiry —
+    // clients then show infinity instead of a fake 1 TB cap / year-2030 expiry.
+    let userinfo = `upload=0; download=${user.usedBytes || 0}`;
+    if (user.quotaBytes > 0) userinfo += `; total=${user.quotaBytes}`;
+    if (user.expiresAt) userinfo += `; expire=${Math.floor(user.expiresAt / 1000)}`;
+    res.setHeader('Subscription-Userinfo', userinfo);
     if (format === 'clash') {
       res.setHeader('Content-Type', 'text/yaml; charset=utf-8');
       res.send(builder.buildClashMetaYaml(bkCollectNodes(req, user, 'full')));
@@ -4037,8 +4040,8 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
     res.setHeader('Content-Disposition', 'inline; filename="Plasma.txt"');
     res.setHeader('Profile-Update-Interval', '24');
     res.setHeader('profile-title', 'base64:' + Buffer.from('Plasma', 'utf8').toString('base64'));
-    // Set 1 TB total traffic and future expiry (v2rayNG rejects total=0 as expired quota)
-    res.setHeader('Subscription-Userinfo', 'upload=1073741824; download=2147483648; total=1099511627776; expire=1893456000');
+    // The owner subscription is truly unlimited: omit total/expire (clients show infinity).
+    res.setHeader('Subscription-Userinfo', 'upload=0; download=0');
 
     if (isBase64) {
       res.send(Buffer.from(text).toString('base64'));
@@ -5292,9 +5295,30 @@ class TcpRouter {
 }
 
 // --- Module: lib/boot.js ---
+// A saved (learned) public host may only be reused when it is an IP literal or a host that is
+// still configured (DOMAIN / PUBLIC_BASE_URL / SUB_BASE_URL). Otherwise a stale hostname —
+// e.g. a filtered domain the owner once opened the panel with — would poison every generated
+// config link forever, even after the variable is removed from plasma.env.
+function bkSavedHostAllowed(config, h) {
+  if (!h) return false;
+  if (isIpLiteral(h)) return true;
+  const dom = normalizeHost(process.env.DOMAIN || process.env.SB_DOMAIN || '');
+  if (dom && h === dom) return true;
+  if (config && config.domain && h === normalizeHost(config.domain)) return true;
+  const urls = [config && config.publicBaseUrl, config && config.subBase, process.env.PUBLIC_BASE_URL, process.env.SUB_BASE_URL];
+  for (const u of urls) {
+    if (!u) continue;
+    let host = '';
+    try { host = new URL(u).hostname; } catch (_) { host = String(u).replace(/^https?:\/\//, '').split(/[/:?#]/)[0]; }
+    if (host && h === host) return true;
+  }
+  return false;
+}
+
 async function resolvePublicHost(config, savedHost) {
   if (config.forceHost) return config.forceHost;
   const explicitDomain = normalizeHost(process.env.DOMAIN || process.env.SB_DOMAIN || '');
+  if (savedHost && !bkIsPlatformHost(savedHost) && !bkSavedHostAllowed(config, savedHost)) { Logger.warn(`Ignoring saved public host '${savedHost}' (not an IP and not configured via DOMAIN/PUBLIC_BASE_URL); detecting the public IP instead.`); savedHost = ''; }
   if (savedHost && !explicitDomain && !bkIsPlatformHost(savedHost)) { Logger.info(`Using public domain saved from an earlier panel visit: ${savedHost}`); return savedHost; }
   if (config.domain) return config.domain;
   if (savedHost && !savedHost.endsWith('.replit.dev')) { Logger.info(`Using public domain saved from an earlier panel visit: ${savedHost}`); return savedHost; }
