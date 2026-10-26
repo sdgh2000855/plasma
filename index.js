@@ -3917,10 +3917,10 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Profile-Update-Interval', '24');
     res.setHeader('profile-title', 'base64:' + Buffer.from(String(user.name || 'Plasma'), 'utf8').toString('base64'));
-    // True unlimited: omit total/expire entirely when there is no quota/expiry —
-    // clients then show infinity instead of a fake 1 TB cap / year-2030 expiry.
-    let userinfo = `upload=0; download=${user.usedBytes || 0}`;
-    if (user.quotaBytes > 0) userinfo += `; total=${user.quotaBytes}`;
+    // Unlimited follows the standard Subscription-Userinfo convention: total=0 means
+    // unlimited, so clients (Happ, v2rayN, ...) render "used / ∞" instead of a fake
+    // 1 TB cap; expire is sent only when the subscription actually expires.
+    let userinfo = `upload=0; download=${user.usedBytes || 0}; total=${user.quotaBytes > 0 ? user.quotaBytes : 0}`;
     if (user.expiresAt) userinfo += `; expire=${Math.floor(user.expiresAt / 1000)}`;
     res.setHeader('Subscription-Userinfo', userinfo);
     if (format === 'clash') {
@@ -4040,8 +4040,8 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
     res.setHeader('Content-Disposition', 'inline; filename="Plasma.txt"');
     res.setHeader('Profile-Update-Interval', '24');
     res.setHeader('profile-title', 'base64:' + Buffer.from('Plasma', 'utf8').toString('base64'));
-    // The owner subscription is truly unlimited: omit total/expire (clients show infinity).
-    res.setHeader('Subscription-Userinfo', 'upload=0; download=0');
+    // The owner subscription is truly unlimited: total=0 is the standard unlimited marker.
+    res.setHeader('Subscription-Userinfo', 'upload=0; download=0; total=0');
 
     if (isBase64) {
       res.send(Buffer.from(text).toString('base64'));
