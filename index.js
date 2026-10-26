@@ -3815,10 +3815,12 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
   // Panel HTML endpoints
   const renderPanel = (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(AssetManager.getIndexHtml());
+    let bkHtml = AssetManager.getIndexHtml();
+    try { bkHtml = bkHtml.replace('</body>', BK_OVERVIEW_HTML.split('__PANEL__').join(panelPath) + '</body>'); } catch (_) {}
+    res.send(bkHtml);
   };
 
-  app.get('/', authMiddleware, renderPanel);
+  app.get('/', (req, res) => { res.status(404).type('text/plain').send('404 Not Found'); });
   // ===== BK traffic meter API (panel session only; POSTs need the X-BK-Req header -> no cross-site forms) =====
   const bkSessionOnly = (req, res, next) => (bkHasSession(req) ? next() : res.status(401).json({ ok: false, error: 'login required' }));
   const bkSameOrigin = (req, res, next) => (req.get('x-bk-req') === '1' ? next() : res.status(403).json({ ok: false, error: 'forbidden' }));
@@ -3900,7 +3902,17 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
   });
   const bkSendUserSub = (req, res, format) => {
     const user = BkUsers.findByToken(req.params.token);
-    if (!user || !BkUsers.isAllowed(user)) { res.status(403).type('text/plain').send('Subscription is not active (expired, over quota or disabled).'); return; }
+    if (!user) { res.status(404).type('text/plain').send('404 Not Found'); return; }
+    if (format === 'page' || (format === 'base64' && bkIsBrowserSubReq(req))) {
+      const subUrl = req.protocol + '://' + req.get('host') + '/u/' + user.token;
+      const nodes = BkUsers.isAllowed(user) ? bkCollectNodes(req, user, 'v2ray') : [];
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.send(bkSubPageHtml(BkUsers.publicView(user), nodes, subUrl));
+      return;
+    }
+    if (!BkUsers.isAllowed(user)) { res.status(403).type('text/plain').send('Subscription is not active (expired, over quota or disabled).'); return; }
     const builder = bkGenFor(req, user, null);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Profile-Update-Interval', '24');
@@ -3921,6 +3933,7 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     }
   };
   app.get('/u/:token', (req, res) => bkSendUserSub(req, res, 'base64'));
+  app.get('/u/:token/page', (req, res) => bkSendUserSub(req, res, 'page'));
   app.get('/u/:token/raw', (req, res) => bkSendUserSub(req, res, 'raw'));
   app.get('/u/:token/clash', (req, res) => bkSendUserSub(req, res, 'clash'));
   app.get('/u/:token/sb', (req, res) => bkSendUserSub(req, res, 'sb'));
@@ -3928,6 +3941,15 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
   app.get(`/${panelPath}/api/users`, bkSessionOnly, (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json({ ok: true, users: BkUsers.list().map(u => BkUsers.publicView(u)) });
+  });
+  app.get(`/${panelPath}/api/overview`, bkSessionOnly, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const us = BkUsers.list();
+    const now = Date.now();
+    res.json({ ok: true,
+      users: { total: us.length, active: us.filter(u => BkUsers.isAllowed(u)).length, usedBytes: us.reduce((a, u) => a + (u.usedBytes || 0), 0) },
+      nodes: BkNodes.list().map(n => ({ name: n.name, flag: n.flag, host: n.host, port: n.port, lastSeen: n.lastSeen || 0, fresh: now - (n.lastSeen || 0) < 180000 })),
+      local: { name: BK_LOC.name, flag: BK_LOC.flag } });
   });
   app.post(`/${panelPath}/api/users`, bkSessionOnly, bkSameOrigin, express.json({ limit: '4kb' }), (req, res) => {
     const b = req.body || {};
@@ -4110,6 +4132,8 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
       res.status(200).send('# WireGuard configuration failed gracefully.\n');
     }
   });
+
+  app.use((req, res) => { res.status(404).type('text/plain').send('404 Not Found'); });
 
   const server = http.createServer(app);
   server.keepAliveTimeout = 120000;
@@ -4470,14 +4494,201 @@ const BkNodes = (() => {
   };
 })();
 
+// ===== Subscription info page (browser view of /u/<token>, PasarGuard-style but simple) =====
+function bkIsBrowserSubReq(req) {
+  const ua = String((req && req.get && req.get('user-agent')) || '');
+  const accept = String((req && req.get && req.get('accept')) || '');
+  if (!/mozilla/i.test(ua)) return false;
+  if (!/text\/html/i.test(accept)) return false;
+  if (/(v2ray|streisand|hiddify|sing-?box|clash|shadowrocket|quantumult|surge|loon|foxray|neko|happ|karing|v2box|napsternet|potatso|stash|shadowsocks|wireguard|openvpn|tun2socks)/i.test(ua)) return false;
+  return true;
+}
+
+function bkSubPageHtml(view, nodes, subUrl) {
+  const v = view || {};
+  let statusText = 'فعال', statusCls = 'ok';
+  if (v.enabled === false) { statusText = 'غیرفعال'; statusCls = 'off'; }
+  else if (v.expiresAt && Date.now() >= v.expiresAt) { statusText = 'منقضی‌شده'; statusCls = 'end'; }
+  else if (v.quotaBytes > 0 && (v.usedBytes || 0) >= v.quotaBytes) { statusText = 'اتمام حجم'; statusCls = 'end'; }
+  else if (!v.allowed) { statusText = 'غیرفعال'; statusCls = 'off'; }
+  const viewJson = JSON.stringify({
+    name: v.name || 'Plasma', statusText, statusCls,
+    quotaBytes: v.quotaBytes || 0, usedBytes: v.usedBytes || 0,
+    expiresAt: v.expiresAt || 0, createdAt: v.createdAt || 0, allowed: !!v.allowed
+  }).replace(/</g, '\\u003c');
+  const cfgJson = JSON.stringify((nodes || []).map(n => ({ name: n.name || '', type: n.type || '', uri: n.uri || '' })).filter(n => n.uri)).replace(/</g, '\\u003c');
+  const subJson = JSON.stringify({ main: subUrl, raw: subUrl + '/raw', clash: subUrl + '/clash', sb: subUrl + '/sb' }).replace(/</g, '\\u003c');
+  return `<!DOCTYPE html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin><link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css">
+<title>اطلاعات اشتراک | Plasma</title>
+<style>
+*{box-sizing:border-box}body{font-family:Vazirmatn,Tahoma,sans-serif;background:radial-gradient(900px 520px at 12% -8%,rgba(94,160,255,.18),transparent 60%),radial-gradient(820px 560px at 105% 0%,rgba(139,124,246,.2),transparent 55%),linear-gradient(160deg,#0a0e1c,#101731);color:#eef0ff;margin:0;padding:24px 16px 40px;min-height:100vh}
+.wrap{max-width:860px;margin:0 auto}
+.brand{text-align:center;font-weight:800;letter-spacing:3px;color:#8ea2ff;font-size:13px;margin-bottom:6px}
+h1{text-align:center;font-size:1.45rem;margin:0 0 20px}
+.card{background:rgba(255,255,255,.045);border:1px solid rgba(148,163,255,.18);border-radius:18px;padding:20px;margin-bottom:16px;backdrop-filter:blur(10px)}
+.card h3{margin:0 0 14px;font-size:1.02rem}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 2px;border-bottom:1px solid rgba(148,163,255,.12);font-size:14px}
+.row:last-child{border-bottom:0}.row .k{color:#93a0b8}.row .val{font-weight:600;text-align:left}
+.badge{display:inline-block;padding:3px 12px;border-radius:999px;font-size:11.5px;font-weight:700}
+.badge.ok{background:rgba(62,207,142,.16);color:#3ecf8e}.badge.off{background:rgba(255,255,255,.12);color:#aab}.badge.end{background:rgba(242,112,138,.16);color:#f2708a}
+.bar{height:9px;border-radius:99px;background:rgba(255,255,255,.1);overflow:hidden;direction:ltr;margin-top:12px}
+.bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#4f8cff,#8b7cf6)}
+.bar i.hot{background:linear-gradient(90deg,#f5b14c,#f2708a)}
+.linkbox{display:flex;gap:8px;align-items:stretch;background:#0b1022;border:1px solid #33415e;border-radius:12px;padding:8px;margin-bottom:10px}
+.linkbox .u{flex:1;direction:ltr;text-align:left;font-family:monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 4px;color:#c9d4ff}
+button{background:linear-gradient(120deg,#4f8cff,#8b7cf6);color:#fff;border:0;border-radius:10px;padding:8px 14px;cursor:pointer;font-family:inherit;font-size:12.5px;white-space:nowrap}
+button.soft{background:rgba(255,255,255,.09);border:1px solid rgba(148,163,255,.25)}
+button.green{background:linear-gradient(120deg,#1fae62,#2ecc71);width:100%;padding:12px;font-size:14px;border-radius:12px;margin-top:4px}
+.fmt{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.cfg{padding:11px 2px;border-bottom:1px solid rgba(148,163,255,.12)}.cfg:last-child{border-bottom:0}
+.cfg .nm{font-weight:700;font-size:13.5px}.cfg .tp{color:#93a0b8;font-size:11px;margin-right:8px}
+.cfg .uri{direction:ltr;text-align:left;font-family:monospace;font-size:11px;color:#9fb2e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:6px 0}
+.cfg .ops{display:flex;gap:6px}
+.warn{background:rgba(242,112,138,.1);border:1px solid rgba(242,112,138,.35);color:#ffb3c0;border-radius:14px;padding:14px 16px;font-size:13.5px;margin-bottom:16px}
+.foot{color:#93a0b8;font-size:12px;text-align:center;line-height:2}
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:#1d2a4a;border:1px solid rgba(148,163,255,.35);color:#fff;padding:9px 18px;border-radius:999px;font-size:13px;opacity:0;pointer-events:none;transition:.25s;z-index:50}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#qrM{position:fixed;inset:0;background:rgba(4,6,14,.8);display:none;align-items:center;justify-content:center;z-index:60}
+#qrM.open{display:flex}
+#qrM .box{background:#121a33;border:1px solid rgba(148,163,255,.3);border-radius:18px;padding:22px;text-align:center;max-width:320px}
+#qrM img{background:#fff;border-radius:10px;padding:8px}
+#qrM .t{margin-bottom:12px;font-weight:700;font-size:14px;word-break:break-all}
+</style></head><body><div class="wrap">
+<div class="brand">P L A S M A</div>
+<h1>اطلاعات اشتراک</h1>
+<div class="card"><h3 id="subName">—</h3>
+<div class="row"><span class="k">وضعیت</span><span class="val"><span class="badge" id="stBadge">—</span></span></div>
+<div class="row"><span class="k">سقف حجم</span><span class="val" id="qTotal">—</span></div>
+<div class="row"><span class="k">مصرف‌شده</span><span class="val" id="qUsed">—</span></div>
+<div class="row"><span class="k">باقی‌مانده</span><span class="val" id="qRemain">—</span></div>
+<div class="bar" id="qBar" style="display:none"><i id="qFill"></i></div>
+<div class="row"><span class="k">تاریخ انقضا</span><span class="val" id="expD">—</span></div>
+<div class="row"><span class="k">زمان باقی‌مانده</span><span class="val" id="expLeft">—</span></div>
+<div class="row"><span class="k">تاریخ ساخت</span><span class="val" id="crD">—</span></div>
+</div>
+<div id="linksZone"></div>
+<div class="foot">لینک اشتراک را کپی کنید و در برنامه خود (مثل v2rayNG، Hiddify، Streisand یا Happ) وارد کنید.<br>با دکمه QR هم می‌توانید کانفیگ را اسکن کنید.</div>
+</div>
+<div id="toast">کپی شد!</div>
+<div id="qrM"><div class="box"><div class="t" id="qrT"></div><img id="qrI" width="230" height="230" alt="QR"><div style="margin-top:14px"><button class="soft" onclick="closeQr()">بستن</button></div></div></div>
+<script>
+var VIEW = ${viewJson};
+var CFGS = ${cfgJson};
+var SUBS = ${subJson};
+function fmtBytes(b){ if(!b) return '0 B'; var u=['B','KB','MB','GB','TB']; var i=Math.min(u.length-1, Math.floor(Math.log(b)/Math.log(1024))); return (b/Math.pow(1024,i)).toFixed(i?2:0)+' '+u[i]; }
+function fmtDate(t){ return t ? new Date(t).toLocaleString('fa-IR') : '—'; }
+function toast(m){ var t=document.getElementById('toast'); t.textContent=m||'کپی شد!'; t.classList.add('show'); setTimeout(function(){ t.classList.remove('show'); },1800); }
+function copyText(s){ if(navigator.clipboard && window.isSecureContext){ navigator.clipboard.writeText(s).then(function(){ toast(); }, function(){ fb(s); }); } else fb(s); }
+function fb(s){ var ta=document.createElement('textarea'); ta.value=s; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); toast(); }catch(e){ toast('کپی نشد'); } document.body.removeChild(ta); }
+function openQr(text, title){ document.getElementById('qrT').textContent=title||'کد QR'; document.getElementById('qrI').src='https://api.qrserver.com/v1/create-qr-code/?size=230x230&data='+encodeURIComponent(text); document.getElementById('qrM').classList.add('open'); }
+function closeQr(){ document.getElementById('qrM').classList.remove('open'); }
+document.getElementById('qrM').addEventListener('click', function(e){ if(e.target===this) closeQr(); });
+function el(tag, cls, txt){ var e=document.createElement(tag); if(cls) e.className=cls; if(txt!=null) e.textContent=txt; return e; }
+function btn(txt, fn, cls){ var b=el('button', cls||'', txt); b.onclick=fn; return b; }
+function linkRow(url, label){
+  var box=el('div','linkbox'); var u=el('div','u', url); u.title=url; box.appendChild(u);
+  box.appendChild(btn('کپی', function(){ copyText(url); }));
+  box.appendChild(btn('QR', function(){ openQr(url, label||'لینک اشتراک'); }, 'soft'));
+  return box;
+}
+(function init(){
+  document.getElementById('subName').textContent = VIEW.name;
+  var bd=document.getElementById('stBadge'); bd.textContent=VIEW.statusText; bd.className='badge '+VIEW.statusCls;
+  document.getElementById('qTotal').textContent = VIEW.quotaBytes ? fmtBytes(VIEW.quotaBytes) : 'نامحدود ∞';
+  document.getElementById('qUsed').textContent = fmtBytes(VIEW.usedBytes);
+  document.getElementById('qRemain').textContent = VIEW.quotaBytes ? fmtBytes(Math.max(0, VIEW.quotaBytes - VIEW.usedBytes)) : 'نامحدود ∞';
+  if(VIEW.quotaBytes){ var pct=Math.min(100, Math.round(100*VIEW.usedBytes/VIEW.quotaBytes)); var bar=document.getElementById('qBar'); bar.style.display='block'; var f=document.getElementById('qFill'); f.style.width=pct+'%'; if(pct>=80) f.className='hot'; }
+  document.getElementById('expD').textContent = VIEW.expiresAt ? fmtDate(VIEW.expiresAt) : 'بدون انقضا ∞';
+  document.getElementById('expLeft').textContent = !VIEW.expiresAt ? 'نامحدود' : (function(){ var d=Math.ceil((VIEW.expiresAt-Date.now())/86400000); return d>0 ? d+' روز' : 'تمام شده'; })();
+  document.getElementById('crD').textContent = VIEW.createdAt ? fmtDate(VIEW.createdAt) : '—';
+  var z=document.getElementById('linksZone');
+  if(!VIEW.allowed){
+    var w=el('div','warn','این اشتراک در حال حاضر فعال نیست ('+VIEW.statusText+'). برای فعال‌سازی با پشتیبانی در تماس باشید.');
+    z.appendChild(w); return;
+  }
+  var c1=el('div','card'); c1.appendChild(el('h3','','لینک اشتراک'));
+  c1.appendChild(linkRow(SUBS.main, 'لینک اشتراک'));
+  var fmt=el('div','fmt');
+  fmt.appendChild(btn('نسخه خام (Raw)', function(){ copyText(SUBS.raw); }, 'soft'));
+  fmt.appendChild(btn('Clash', function(){ copyText(SUBS.clash); }, 'soft'));
+  fmt.appendChild(btn('Sing-box', function(){ copyText(SUBS.sb); }, 'soft'));
+  c1.appendChild(fmt);
+  var all=el('button','green','کپی همه کانفیگ‌ها');
+  all.onclick=function(){ copyText(CFGS.map(function(c){ return c.uri; }).join('\n')); };
+  c1.appendChild(all);
+  z.appendChild(c1);
+  if(CFGS.length){
+    var c2=el('div','card'); c2.appendChild(el('h3','','کانفیگ‌ها ('+CFGS.length+')'));
+    CFGS.forEach(function(c){
+      var d=el('div','cfg');
+      var head=el('div'); head.appendChild(el('span','nm', c.name)); if(c.type) head.appendChild(el('span','tp', c.type));
+      d.appendChild(head);
+      d.appendChild(el('div','uri', c.uri));
+      var ops=el('div','ops');
+      ops.appendChild(btn('کپی کانفیگ', function(){ copyText(c.uri); }));
+      ops.appendChild(btn('QR Code', function(){ openQr(c.uri, c.name); }, 'soft'));
+      d.appendChild(ops);
+      c2.appendChild(d);
+    });
+    z.appendChild(c2);
+  }
+})();
+</script></body></html>`;
+}
+
+// ===== Panel overview strip (injected into the panel page by renderPanel) =====
+const BK_OVERVIEW_HTML = `<style>
+.pov-wrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 16px}
+.pov-card{background:rgba(127,148,255,.07);border:1px solid rgba(148,163,255,.22);border-radius:14px;padding:12px 14px}
+.pov-n{font-size:1.12rem;font-weight:800}
+.pov-t{font-size:11px;opacity:.65;margin-top:2px}
+.pov-wrap a{text-decoration:none;color:inherit}
+</style>
+<script>
+(function(){
+  function fmtBytes(b){ if(!b) return '0 B'; var u=['B','KB','MB','GB','TB']; var i=Math.min(u.length-1, Math.floor(Math.log(b)/Math.log(1024))); return (b/Math.pow(1024,i)).toFixed(i?2:0)+' '+u[i]; }
+  function build(){
+    var home = document.getElementById('viewHome');
+    if(!home) return null;
+    var wrap = document.getElementById('povWrap');
+    if(!wrap){
+      wrap = document.createElement('div'); wrap.id='povWrap'; wrap.className='pov-wrap';
+      home.insertBefore(wrap, home.firstChild);
+    }
+    return wrap;
+  }
+  function card(num, label, href){
+    var inner = '<div class="pov-n">'+num+'</div><div class="pov-t">'+label+'</div>';
+    return href ? '<a class="pov-card" href="'+href+'">'+inner+'</a>' : '<div class="pov-card">'+inner+'</div>';
+  }
+  function load(){
+    fetch('/__PANEL__/api/overview', { credentials:'same-origin' }).then(function(r){ if(!r.ok) throw 0; return r.json(); }).then(function(j){
+      var wrap = build(); if(!wrap) return;
+      var fresh = (j.nodes||[]).filter(function(n){ return n.fresh; }).length;
+      var loc = (j.local||{});
+      wrap.innerHTML =
+        card(j.users.total + ' <span style="font-size:.72rem;opacity:.7">(' + j.users.active + ' فعال)</span>', 'اشتراک‌ها — مدیریت', '/__PANEL__/users') +
+        card(fmtBytes(j.users.usedBytes), 'مجموع مصرف اشتراک‌ها') +
+        card(fresh + ' / ' + (j.nodes||[]).length, 'نودهای آنلاین') +
+        card((loc.name||'') + ' ' + (loc.flag||''), 'لوکیشن این سرور');
+    }).catch(function(){ var w=document.getElementById('povWrap'); if(w) w.remove(); });
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', load); else load();
+  setInterval(load, 60000);
+})();
+</script>`;
+
 const BK_USERS_PAGE = `<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin><link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css">
 <title>مدیریت اشتراک‌ها | Plasma</title>
 <style>
 *{box-sizing:border-box}body{font-family:Vazirmatn,Tahoma,sans-serif;background:radial-gradient(900px 520px at 12% -8%,rgba(94,160,255,.18),transparent 60%),radial-gradient(820px 560px at 105% 0%,rgba(139,124,246,.2),transparent 55%),linear-gradient(160deg,#0a0e1c,#101731);color:#eef0ff;margin:0;padding:22px;min-height:100vh}
-h2{font-size:1.35rem}h3{margin-top:0}
+h2{font-size:1.35rem;margin:0}h3{margin-top:0}
+.top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px}
+.top a{color:#7aa7ff;font-size:13px;text-decoration:none}
 .card{background:rgba(255,255,255,.045);border:1px solid rgba(148,163,255,.18);border-radius:18px;padding:18px;margin-bottom:16px;backdrop-filter:blur(10px)}
-input{background:#0b1022;border:1px solid #33415e;color:#fff;border-radius:10px;padding:9px;width:100%}
+input,select{background:#0b1022;border:1px solid #33415e;color:#fff;border-radius:10px;padding:9px;width:100%;font-family:inherit}
 button{background:linear-gradient(120deg,#4f8cff,#8b7cf6);color:#fff;border:0;border-radius:999px;padding:7px 13px;cursor:pointer;margin:2px;font-family:inherit;font-size:12px}
 button.soft{background:rgba(255,255,255,.09);border:1px solid rgba(148,163,255,.25)}
 button.red{background:#c0392b}
@@ -4491,23 +4702,69 @@ label{font-size:12px;color:#93a0b8;display:block;margin-bottom:5px}
 .badge.ok{background:rgba(62,207,142,.16);color:#3ecf8e}.badge.off{background:rgba(255,255,255,.12);color:#aab}
 .badge.end{background:rgba(242,112,138,.16);color:#f2708a}
 .mut{color:#93a0b8;font-size:11px}.links a{color:#7aa7ff;font-size:12px;margin-left:8px}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.stat{flex:1;min-width:130px;background:rgba(255,255,255,.045);border:1px solid rgba(148,163,255,.18);border-radius:16px;padding:13px 16px}
+.stat .n{font-size:1.25rem;font-weight:800}.stat .t{color:#93a0b8;font-size:11.5px;margin-top:2px}
+.nodechip{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.06);border:1px solid rgba(148,163,255,.2);border-radius:999px;padding:5px 12px;font-size:12px;margin:2px}
+.dot{width:8px;height:8px;border-radius:50%;background:#3ecf8e;box-shadow:0 0 8px #3ecf8e}
+.dot.off{background:#f2708a;box-shadow:0 0 8px #f2708a}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.toolbar .search{flex:2;min-width:180px}.toolbar .filter{flex:1;min-width:140px}
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:#1d2a4a;border:1px solid rgba(148,163,255,.35);color:#fff;padding:9px 18px;border-radius:999px;font-size:13px;opacity:0;pointer-events:none;transition:.25s;z-index:50}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#qrM{position:fixed;inset:0;background:rgba(4,6,14,.8);display:none;align-items:center;justify-content:center;z-index:60}
+#qrM.open{display:flex}
+#qrM .box{background:#121a33;border:1px solid rgba(148,163,255,.3);border-radius:18px;padding:22px;text-align:center;max-width:320px}
+#qrM img{background:#fff;border-radius:10px;padding:8px}
+#qrM .t{margin-bottom:12px;font-weight:700;font-size:14px;word-break:break-all}
+#createResult{display:none;border-color:rgba(62,207,142,.4)}
+@media (max-width:760px){ table,thead,tbody,tr,td{display:block;width:100%} thead{display:none} tr{border:1px solid rgba(148,163,255,.16);border-radius:14px;margin-bottom:12px;padding:8px} td{border-bottom:0;padding:6px 8px} }
 </style></head><body>
-<h2>مدیریت اشتراک‌ها — Plasma</h2>
+<div class="top"><h2>مدیریت اشتراک‌ها — Plasma</h2><a id="backLink" href="#">→ بازگشت به پنل</a></div>
+<div class="stats">
+<div class="stat"><div class="n" id="sumTotal">—</div><div class="t">کل اشتراک‌ها</div></div>
+<div class="stat"><div class="n" id="sumActive">—</div><div class="t">فعال</div></div>
+<div class="stat"><div class="n" id="sumBlocked">—</div><div class="t">مسدود / منقضی</div></div>
+<div class="stat"><div class="n" id="sumUsed">—</div><div class="t">مجموع مصرف اشتراک‌ها</div></div>
+</div>
+<div class="card"><h3>نودها</h3><div id="nodesRow"><span class="mut">در حال بارگذاری…</span></div></div>
 <div class="card"><h3>اشتراک جدید</h3><div class="grid">
 <div><label>نام کاربر</label><input id="n"></div>
 <div><label>حجم (GB) — ۰ یعنی نامحدود</label><input id="g" type="number" min="0" step="any" value="10"></div>
 <div><label>مدت (روز) — ۰ یعنی بدون انقضا</label><input id="d" type="number" min="0" step="any" value="30"></div>
-</div><p><button onclick="createUser()">ساخت اشتراک</button></p></div>
-<div class="card"><table><thead><tr><th>نام</th><th>مصرف</th><th>انقضا</th><th>وضعیت</th><th>لینک‌ها</th><th>عملیات</th></tr></thead><tbody id="rows"></tbody></table></div>
+</div><p><button onclick="createUser()">ساخت اشتراک</button></p>
+<div id="createResult"><div class="mut" style="margin-bottom:6px">اشتراک ساخته شد — لینک‌ها:</div><div id="createLinks"></div></div>
+</div>
+<div class="card">
+<div class="toolbar"><div class="search"><input id="q" placeholder="جستجو بر اساس نام یا تگ…"></div><div class="filter"><select id="f"><option value="all">همه وضعیت‌ها</option><option value="active">فقط فعال</option><option value="blocked">مسدود / منقضی / تمام‌شده</option><option value="disabled">غیرفعال</option></select></div></div>
+<div class="mut" id="cnt" style="margin-bottom:8px"></div>
+<table><thead><tr><th>نام</th><th>مصرف</th><th>انقضا</th><th>وضعیت</th><th>لینک‌ها</th><th>عملیات</th></tr></thead><tbody id="rows"></tbody></table>
+</div>
+<div id="toast">کپی شد!</div>
+<div id="qrM"><div class="box"><div class="t" id="qrT"></div><img id="qrI" width="230" height="230" alt="QR"><div style="margin-top:14px"><button class="soft" onclick="closeQr()">بستن</button></div></div></div>
 <script>
-var API = location.pathname.replace(/\\/users\\/?$/, '') + '/api/users';
+var PREFIX = location.pathname.replace(/\/users\/?$/, '');
+var API = PREFIX + '/api/users';
+var OVERVIEW = PREFIX + '/api/overview';
+document.getElementById('backLink').href = PREFIX || '/';
+var ALL = [];
 function H(){ return {'Content-Type':'application/json','x-bk-req':'1'}; }
 function fmtBytes(b){ if(!b) return '0 B'; var u=['B','KB','MB','GB','TB']; var i=Math.min(u.length-1, Math.floor(Math.log(b)/Math.log(1024))); return (b/Math.pow(1024,i)).toFixed(i?2:0)+' '+u[i]; }
 function fmtDate(t){ return t ? new Date(t).toLocaleString('fa-IR') : 'بدون انقضا'; }
+function fmtAgo(t){ if(!t) return 'نامشخص'; var s=Math.max(0, Math.floor((Date.now()-t)/1000)); if(s<20) return 'همین الان'; if(s<60) return s+' ثانیه پیش'; var m=Math.floor(s/60); if(m<60) return m+' دقیقه پیش'; var h=Math.floor(m/60); if(h<24) return h+' ساعت پیش'; return Math.floor(h/24)+' روز پیش'; }
 function daysLeft(t){ if(!t) return 'نامحدود'; var d=Math.ceil((t-Date.now())/86400000); return d>0 ? d+' روز مانده' : 'تمام شده'; }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
-function load(){ fetch(API,{headers:H()}).then(function(r){return r.json();}).then(function(j){ render(j.users||[]); }); }
-function render(users){ var tb=document.getElementById('rows'); tb.innerHTML=''; if(!users.length){ tb.innerHTML='<tr><td colspan="6">هنوز اشتراکی ساخته نشده</td></tr>'; return; } users.forEach(function(u){
+function toast(m){ var t=document.getElementById('toast'); t.textContent=m||'کپی شد!'; t.classList.add('show'); setTimeout(function(){ t.classList.remove('show'); },1800); }
+function copyText(s){ if(navigator.clipboard && window.isSecureContext){ navigator.clipboard.writeText(s).then(function(){ toast(); }, function(){ fb(s); }); } else fb(s); }
+function fb(s){ var ta=document.createElement('textarea'); ta.value=s; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); toast(); }catch(e){ toast('کپی نشد'); } document.body.removeChild(ta); }
+function openQr(text, title){ document.getElementById('qrT').textContent=title||'کد QR'; document.getElementById('qrI').src='https://api.qrserver.com/v1/create-qr-code/?size=230x230&data='+encodeURIComponent(text); document.getElementById('qrM').classList.add('open'); }
+function closeQr(){ document.getElementById('qrM').classList.remove('open'); }
+document.getElementById('qrM').addEventListener('click', function(e){ if(e.target===this) closeQr(); });
+function load(){ fetch(API,{headers:H()}).then(function(r){return r.json();}).then(function(j){ ALL=j.users||[]; renderStats(); render(); }); loadOverview(); }
+function renderStats(){ var act=0, used=0; ALL.forEach(function(u){ if(u.allowed) act++; used+=u.usedBytes||0; }); document.getElementById('sumTotal').textContent=ALL.length; document.getElementById('sumActive').textContent=act; document.getElementById('sumBlocked').textContent=ALL.length-act; document.getElementById('sumUsed').textContent=fmtBytes(used); }
+function loadOverview(){ fetch(OVERVIEW,{headers:H()}).then(function(r){return r.json();}).then(function(j){ var row=document.getElementById('nodesRow'); row.innerHTML=''; var loc=(j.local||{}); var lc=document.createElement('span'); lc.className='nodechip'; lc.innerHTML='<span class="dot"></span>'+esc((loc.name||'Local')+' '+(loc.flag||''))+' — این سرور'; row.appendChild(lc); (j.nodes||[]).forEach(function(n){ var c=document.createElement('span'); c.className='nodechip'; c.innerHTML='<span class="dot'+(n.fresh?'':' off')+'"></span>'+esc((n.name||'Node')+' '+(n.flag||''))+'<span class="mut">'+(n.fresh?'آنلاین':'آفلاین — '+fmtAgo(n.lastSeen))+'</span>'; row.appendChild(c); }); if(!(j.nodes||[]).length){ var m=document.createElement('span'); m.className='mut'; m.textContent=' نود راه‌دوری ثبت نشده'; row.appendChild(m); } }).catch(function(){}); }
+function statusOf(u){ if(!u.enabled) return 'disabled'; if(!u.allowed) return 'blocked'; return 'active'; }
+function render(){ var q=(document.getElementById('q').value||'').toLowerCase(); var f=document.getElementById('f').value; var tb=document.getElementById('rows'); tb.innerHTML=''; var users=ALL.filter(function(u){ var okQ=!q || (u.name||'').toLowerCase().indexOf(q)>=0 || (u.tag||'').toLowerCase().indexOf(q)>=0; var okF=f==='all' || statusOf(u)===f; return okQ && okF; }); document.getElementById('cnt').textContent='نمایش '+users.length+' از '+ALL.length+' اشتراک'; if(!users.length){ tb.innerHTML='<tr><td colspan="6">موردی پیدا نشد</td></tr>'; return; } users.forEach(function(u){
  var tr=document.createElement('tr');
  var pct = u.quotaBytes ? Math.min(100, Math.round(100*(u.usedBytes||0)/u.quotaBytes)) : 0;
  var expired = u.expiresAt && Date.now()>=u.expiresAt;
@@ -4519,11 +4776,12 @@ function render(users){ var tb=document.getElementById('rows'); tb.innerHTML='';
  tr.children[2].innerHTML = fmtDate(u.expiresAt)+'<div class="mut">'+daysLeft(u.expiresAt)+'</div>';
  tr.children[3].innerHTML = status;
  var L=tr.children[4];
- L.appendChild(mkLink('اشتراک', sub)); L.appendChild(mkLink('Clash', sub+'/clash')); L.appendChild(mkLink('Sing-box', sub+'/sb'));
+ L.appendChild(mkLink('اشتراک', sub)); L.appendChild(mkLink('صفحه', sub+'/page')); L.appendChild(mkLink('Clash', sub+'/clash')); L.appendChild(mkLink('Sing-box', sub+'/sb'));
  var c=tr.children[5];
- c.appendChild(btn('کپی لینک', function(){ navigator.clipboard.writeText(sub); }));
- c.appendChild(btn('کپی Clash', function(){ navigator.clipboard.writeText(sub+'/clash'); }, 'soft'));
- c.appendChild(btn('کپی Sing-box', function(){ navigator.clipboard.writeText(sub+'/sb'); }, 'soft'));
+ c.appendChild(btn('کپی لینک', function(){ copyText(sub); }));
+ c.appendChild(btn('QR', function(){ openQr(sub, 'اشتراک '+u.name); }, 'soft'));
+ c.appendChild(btn('کپی Clash', function(){ copyText(sub+'/clash'); }, 'soft'));
+ c.appendChild(btn('کپی Sing-box', function(){ copyText(sub+'/sb'); }, 'soft'));
  c.appendChild(btn('تمدید', function(){ var v=prompt('چند روز تمدید شود؟','30'); if(v) post(u.id+'/extend',{days:parseFloat(v)||0}); }));
  c.appendChild(btn('افزودن حجم', function(){ var v=prompt('چند GB اضافه شود؟','10'); if(v) post(u.id+'/add-volume',{gb:parseFloat(v)||0}); }, 'soft'));
  c.appendChild(btn('ریست مصرف', function(){ if(confirm('مصرف این اشتراک صفر شود؟')) post(u.id+'/reset',{}); }, 'soft'));
@@ -4533,9 +4791,12 @@ function render(users){ var tb=document.getElementById('rows'); tb.innerHTML='';
 function mkLink(t,href){ var a=document.createElement('a'); a.href=href; a.textContent=t; a.target='_blank'; return a; }
 function btn(t,f,cls){ var b=document.createElement('button'); b.textContent=t; if(cls)b.className=cls; b.onclick=f; return b; }
 function post(path, body){ fetch(API+'/'+path,{method:'POST',headers:H(),body:JSON.stringify(body||{})}).then(function(){ load(); }); }
-function createUser(){ var name=document.getElementById('n').value; var g=parseFloat(document.getElementById('g').value)||0; var d=parseFloat(document.getElementById('d').value)||0; fetch(API,{method:'POST',headers:H(),body:JSON.stringify({name:name,quotaGB:g,days:d})}).then(function(){ document.getElementById('n').value=''; load(); }); }
-load(); setInterval(load, 20000);
-</script></body></html>`;
+function createUser(){ var name=document.getElementById('n').value; var g=parseFloat(document.getElementById('g').value)||0; var d=parseFloat(document.getElementById('d').value)||0; fetch(API,{method:'POST',headers:H(),body:JSON.stringify({name:name,quotaGB:g,days:d})}).then(function(r){return r.json();}).then(function(j){ document.getElementById('n').value=''; if(j && j.user){ var sub=location.origin+j.user.sub; var box=document.getElementById('createResult'); box.style.display='block'; var L=document.getElementById('createLinks'); L.innerHTML=''; L.appendChild(btn('کپی لینک اشتراک', function(){ copyText(sub); })); L.appendChild(btn('صفحه اشتراک', function(){ window.open(sub+'/page','_blank'); }, 'soft')); L.appendChild(btn('QR', function(){ openQr(sub, 'اشتراک '+j.user.name); }, 'soft')); var nm=document.createElement('span'); nm.className='mut'; nm.textContent=' «'+j.user.name+'» '; L.appendChild(nm); } load(); }); }
+document.getElementById('q').addEventListener('input', render);
+document.getElementById('f').addEventListener('change', render);
+load(); setInterval(load, 30000);
+</script></body></html>
+`;
 
 class TcpRouter {
   constructor(config, targetPorts, expressServer, expressApp) {
