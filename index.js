@@ -5779,7 +5779,17 @@ async function startGate(userConfig = {}) {
 }
 
 // --- Auto-start execution ---
-if (require.main === module) {
+// Some Pterodactyl eggs (e.g. HeavenCloud) load the main file through ts-node
+// instead of running it directly; there require.main !== module even though
+// this file IS the process entry point, and Plasma would exit 0 silently.
+// Fall back to scanning argv for this file's own path.
+const _bkEntryIsThisFile = (() => {
+  try {
+    const _p = require('path');
+    return process.argv.slice(1).some((a) => typeof a === 'string' && /\.js$/.test(a) && _p.resolve(a) === __filename);
+  } catch (_) { return false; }
+})();
+if (require.main === module || _bkEntryIsThisFile) {
   startGate(BK_CONFIG).catch(err => {
     console.error('[FATAL] Failed to start Plasma:', err);
     process.exit(1);
