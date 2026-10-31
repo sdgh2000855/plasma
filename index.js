@@ -659,6 +659,7 @@ function buildConfig(userOverrides = {}) {
     xrayBin: path.join(dataDir, 'bin', os.platform() === 'win32' ? 'xray.exe' : 'xray'),
     xrayConfig: path.join(dataDir, 'xray.json'),
     xrayLog: path.join(dataDir, 'xray.log'),
+    xrayAccessLog: path.join(dataDir, 'xray-access.log'),
     cloudflaredBin: path.join(dataDir, 'bin', os.platform() === 'win32' ? 'cloudflared.exe' : 'cloudflared'),
     cloudflaredLog: path.join(dataDir, 'cloudflared.log')
   };
@@ -1341,6 +1342,13 @@ class SingBoxEngine {
     return [this.stateManager.state.uuid];
   }
 
+  /** BK_ACTIVITY: like bkUserUuids, but each entry carries the log identity
+   *  (subscription tag, or 'owner') so engine access logs can be attributed. */
+  bkUserEntries() {
+    try { const a = BkUsers.activeEntries(); if (a && a.length) return a; } catch (_) {}
+    return [{ uuid: this.stateManager.state.uuid, tag: 'owner' }];
+  }
+
   generateRealityKeys() {
     if (!(this.config.enable && this.config.enable.reality)) return;
     const state = this.stateManager.state;
@@ -1394,7 +1402,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vmessWs,
         users: [
-          ...this.bkUserUuids().map(u => ({ uuid: u, alterId: 0 }))
+          ...this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, alterId: 0 }))
         ],
         transport: {
           type: 'ws',
@@ -1413,7 +1421,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessWs,
         users: [
-          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
+          ...this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, flow: '' }))
         ],
         tls: { enabled: false },
         transport: {
@@ -1434,7 +1442,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessWsTls,
         users: [
-          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
+          ...this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, flow: '' }))
         ],
         tls: {
           enabled: true,
@@ -1460,7 +1468,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessHu,
         users: [
-          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
+          ...this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, flow: '' }))
         ],
         tls: { enabled: false },
         transport: {
@@ -1474,7 +1482,7 @@ class SingBoxEngine {
     if (enable.vmessHttpUpgrade && this.ports.vmessHu) {
       inbounds.push({
         type: 'vmess', tag: 'vmess-hu-in', listen: '127.0.0.1', listen_port: this.ports.vmessHu,
-        users: this.bkUserUuids().map(u => ({ uuid: u, alterId: 0 })),
+        users: this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, alterId: 0 })),
         transport: { type: 'httpupgrade', path: BK_PATHS.vmessHu }
       });
     }
@@ -1483,7 +1491,7 @@ class SingBoxEngine {
     if (enable.trojanHttpUpgrade && this.ports.trojanHu) {
       inbounds.push({
         type: 'trojan', tag: 'trojan-hu-in', listen: '127.0.0.1', listen_port: this.ports.trojanHu,
-        users: this.bkUserUuids().map(u => ({ password: u })),
+        users: this.bkUserEntries().map(e => ({ name: e.tag, password: e.uuid })),
         transport: { type: 'httpupgrade', path: BK_PATHS.trojanHu }
       });
     }
@@ -1540,7 +1548,7 @@ class SingBoxEngine {
           listen: '127.0.0.1',
           listen_port: 0,
           users: [
-            ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
+            ...this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, flow: '' }))
           ]
         }
       );
@@ -1592,7 +1600,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.trojanWs,
         users: [
-          ...this.bkUserUuids().map(u => ({ password: u }))
+          ...this.bkUserEntries().map(e => ({ name: e.tag, password: e.uuid }))
         ],
         transport: {
           type: 'ws',
@@ -1610,7 +1618,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.trojanGrpcTls,
         users: [
-          ...this.bkUserUuids().map(u => ({ password: u }))
+          ...this.bkUserEntries().map(e => ({ name: e.tag, password: e.uuid }))
         ],
         tls: {
           enabled: true,
@@ -1634,7 +1642,7 @@ class SingBoxEngine {
         listen: '127.0.0.1',
         listen_port: this.ports.vlessGrpc,
         users: [
-          ...this.bkUserUuids().map(u => ({ uuid: u, flow: '' }))
+          ...this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, flow: '' }))
         ],
         tls: { enabled: false },
         transport: {
@@ -1649,7 +1657,7 @@ class SingBoxEngine {
       ensureTlsCertificates(this.paths.certPath, this.paths.keyPath, this.config.domain || 'www.google.com');
       inbounds.push({
         type: 'vless', tag: 'vless-grpc-tls-in', listen: '127.0.0.1', listen_port: this.ports.vlessGrpcTls,
-        users: this.bkUserUuids().map(u => ({ uuid: u, flow: '' })),
+        users: this.bkUserEntries().map(e => ({ name: e.tag, uuid: e.uuid, flow: '' })),
         tls: {
           enabled: true,
           server_name: this.config.domain || 'www.google.com',
@@ -1829,6 +1837,19 @@ class SingBoxEngine {
     const onData = (buf) => {
       try { fs.writeSync(logFd, buf); } catch (_) {}
       const text = buf.toString('utf8').replace(/\x1b\[[0-9;]*m/g, '');
+      // BK_ACTIVITY: distill per-user destination events from connection logs:
+      // "inbound/vless[vless-ws-in]: [utag] inbound connection to host:port".
+      if (text.indexOf(' connection to ') >= 0) {
+        for (const line of text.split('\n')) {
+          if (line.indexOf(' connection to ') < 0) continue;
+          const m = line.match(/inbound\/\w+\[([^\]]+)\]: \[([^\]]+)\] inbound (?:packet )?connection to ([^:\s]+):(\d+)/);
+          if (!m) continue;
+          try {
+            const uid = BkUsers.idForName(m[2]);
+            if (uid) BkActivity.record({ t: Date.now(), u: uid, h: m[3], p: parseInt(m[4], 10) || 0, n: m[1].replace(/-in$/, '') });
+          } catch (_) {}
+        }
+      }
       for (const line of text.split('\n')) {
         if (!/FATAL|ERROR|WARN|panic/i.test(line)) continue;
         if (Date.now() - windowStart > 60000) { windowStart = Date.now(); printed = 0; }
@@ -1899,6 +1920,13 @@ class XrayEngine {
     return [this.stateManager.state.uuid];
   }
 
+  /** BK_ACTIVITY: like bkUserUuids, but each entry carries the log identity
+   *  (subscription tag, or 'owner') so the Xray access log can be attributed. */
+  bkUserEntries() {
+    try { const a = BkUsers.activeEntries(); if (a && a.length) return a; } catch (_) {}
+    return [{ uuid: this.stateManager.state.uuid, tag: 'owner' }];
+  }
+
   static xhttpPath() {
     return BK_PATHS.xhttp;
   }
@@ -1912,7 +1940,7 @@ class XrayEngine {
         listen: '127.0.0.1',
         port: this.ports.xhttp,
         protocol: 'vless',
-        settings: { clients: this.bkUserUuids().map(u => ({ id: u, level: 0 })), decryption: 'none' },
+        settings: { clients: this.bkUserEntries().map(e => ({ id: e.uuid, email: e.tag, level: 0 })), decryption: 'none' },
         streamSettings: {
           network: 'xhttp',
           security: 'none', // TLS (if any) is terminated in front of Xray
@@ -1931,7 +1959,7 @@ class XrayEngine {
       });
     }
     return {
-      log: { loglevel: 'warning' },
+      log: { access: this.paths.xrayAccessLog, loglevel: 'warning' },
       inbounds,
       outbounds: [
         { protocol: 'freedom', tag: 'direct' },
@@ -1979,6 +2007,7 @@ class XrayEngine {
     };
     this.process.stdout.on('data', onData);
     this.process.stderr.on('data', onData);
+    this._startAccessTail();
     this.process.on('error', (err) => Logger.error(`Xray process error: ${err.message}`));
     this.process.on('exit', (code, sig) => {
       try { fs.closeSync(logFd); } catch (_) {}
@@ -1993,6 +2022,52 @@ class XrayEngine {
         Logger.error('Xray-core keeps crashing; giving up. See xray.log in the data directory.');
       }
     });
+  }
+
+  /** BK_ACTIVITY: tail the Xray access log and distill per-user destination
+   *  events ("... accepted tcp:host:port [vless-xhttp-in >> direct] email: utag").
+   *  The file is truncated in place past ~4 MB so it can never fill the disk.
+   *  The tailer survives engine respawns (Xray appends to the same file). */
+  _startAccessTail() {
+    if (this._accessTail) return;
+    const file = this.paths.xrayAccessLog;
+    let offset = 0;
+    let partial = '';
+    try { offset = fs.statSync(file).size; } catch (_) {}
+    const tick = () => {
+      let st = null;
+      try { st = fs.statSync(file); } catch (_) { return; }
+      if (st.size < offset) { offset = 0; partial = ''; }
+      if (st.size === offset) return;
+      let chunk = '';
+      try {
+        const fd = fs.openSync(file, 'r');
+        try {
+          const len = st.size - offset;
+          const b = Buffer.alloc(len);
+          fs.readSync(fd, b, 0, len, offset);
+          chunk = b.toString('utf8');
+          offset = st.size;
+        } finally { fs.closeSync(fd); }
+      } catch (_) { return; }
+      const lines = (partial + chunk).split('\n');
+      partial = lines.pop() || '';
+      for (const line of lines) {
+        if (line.indexOf('accepted ') < 0 || line.indexOf('email: ') < 0) continue;
+        const m = line.match(/accepted (?:tcp|udp):([^:\s]+):(\d+) \[[^\]]+\] email: (\S+)/);
+        if (!m) continue;
+        try {
+          const uid = BkUsers.idForName(m[3]);
+          if (uid) BkActivity.record({ t: Date.now(), u: uid, h: m[1], p: parseInt(m[2], 10) || 0, n: 'vless-xhttp' });
+        } catch (_) {}
+      }
+      if (st.size > 4 * 1024 * 1024) {
+        try { fs.truncateSync(file, 0); offset = 0; partial = ''; } catch (_) {}
+      }
+    };
+    const timer = setInterval(tick, 1500);
+    if (timer.unref) timer.unref();
+    this._accessTail = timer;
   }
 
   _probe() {
@@ -3889,15 +3964,21 @@ function createHttpPanel(config, stateManager, engineStatusGetter, resolvedHostG
     res.json({ ok: !!nd });
   });
   app.get('/api/node/bundle', bkNodeAuth, (req, res) => {
-    res.json({ ok: true, mainUuid: stateManager.state.uuid, users: BkUsers.list().map(u => ({ id: u.id, tag: u.tag, name: u.name, uuid: u.uuid, token: u.token, quotaBytes: u.quotaBytes || 0, usedBytes: u.usedBytes || 0, expiresAt: u.expiresAt || 0, enabled: u.enabled !== false, createdAt: u.createdAt || 0 })) });
+    res.json({ ok: true, mainUuid: stateManager.state.uuid, users: BkUsers.list().map(u => ({ id: u.id, tag: u.tag, name: u.name, uuid: u.uuid, token: u.token, quotaBytes: u.quotaBytes || 0, usedBytes: u.usedBytes || 0, expiresAt: u.expiresAt || 0, enabled: u.enabled !== false, createdAt: u.createdAt || 0, lastSeenAt: u.lastSeenAt || 0, lastActiveAt: u.lastActiveAt || 0 })) });
   });
-  app.post('/api/node/usage', bkNodeAuth, express.json({ limit: '64kb' }), (req, res) => {
+  app.post('/api/node/usage', bkNodeAuth, express.json({ limit: '256kb' }), (req, res) => {
     const d = (req.body && req.body.deltas) || {};
     let applied = 0;
     for (const id of Object.keys(d)) {
       const b = Math.floor(Number(d[id]) || 0);
       if (b > 0 && BkUsers.find(id)) { BkUsers.addUsage(id, b, 0); applied += b; }
     }
+    const seen = (req.body && req.body.seen) || {};
+    for (const id of Object.keys(seen)) {
+      const s = seen[id] || {};
+      BkUsers.applySeen(id, Math.floor(Number(s.s) || 0), Math.floor(Number(s.a) || 0));
+    }
+    if (req.body && Array.isArray(req.body.acts)) BkActivity.ingest(req.body.acts);
     res.json({ ok: true, applied });
   });
   const bkSendUserSub = (req, res, format) => {
@@ -4000,6 +4081,13 @@ app.post(`/${panelPath}/api/users/:id/delete`, bkSessionOnly, bkSameOrigin, (req
     if (!BkUsers.remove(req.params.id)) { res.status(404).json({ ok: false, error: 'user not found' }); return; }
     if (bkHooks.reloadEngines) bkHooks.reloadEngines();
     res.json({ ok: true });
+  });
+  app.get(`/${panelPath}/api/users/:id/activity`, bkSessionOnly, (req, res) => {
+    const u = BkUsers.find(req.params.id);
+    if (!u) { res.status(404).json({ ok: false, error: 'user not found' }); return; }
+    res.setHeader('Cache-Control', 'no-store');
+    const r = BkActivity.query({ userId: u.id, from: req.query.from, to: req.query.to, q: req.query.q, limit: req.query.limit });
+    res.json({ ok: true, total: r.total, top: r.top, rows: r.rows });
   });
   app.get('/f/morabba.woff2', (req, res) => { res.setHeader('Content-Type', 'font/woff2'); res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); res.send(Buffer.from(BK_FONT_MORABBA_B64, 'base64')); });
   app.get('/f/iransansx.ttf', (req, res) => { res.setHeader('Content-Type', 'font/ttf'); res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); res.send(Buffer.from(BK_FONT_IRANSANS_B64, 'base64')); });
@@ -4308,11 +4396,30 @@ const BkUsers = (() => {
     if (onBlock) { try { onBlock(u); } catch (_) {} }
   }
 
+  // Last-seen / last-active stamps: a connection start (meter) marks "seen",
+  // flowing bytes (addUsage) mark "active". User records update at most every
+  // 30s (saveSoon debounces the write); a max-merged pending map is kept
+  // separately so node agents can report fresh stamps to the main panel even
+  // though bundle syncs replace the local user records every 30s.
+  const seenPending = {};
+  function stamp(id, kind) {
+    if (!id) return;
+    const now = Date.now();
+    let p = seenPending[id];
+    if (!p) { p = seenPending[id] = { s: 0, a: 0 }; }
+    if (now > (p[kind] || 0)) p[kind] = now;
+    const u = find(id);
+    if (!u) return;
+    const key = kind === 's' ? 'lastSeenAt' : 'lastActiveAt';
+    if (now - (u[key] || 0) > 30000) { u[key] = now; saveSoon(); }
+  }
+
   function addUsage(id, up, down) {
     const u = find(id);
     if (!u || (!up && !down)) return;
     const was = isAllowed(u);
     u.usedBytes = (u.usedBytes || 0) + up + down;
+    stamp(id, 'a');
     if (onUsage) { try { onUsage(u.id, up + down); } catch (_) {} }
     saveSoon();
     if (was && !isAllowed(u)) { u._wasAllowed = false; blockTransition(u, 'traffic quota reached'); }
@@ -4320,6 +4427,7 @@ const BkUsers = (() => {
 
   /** Count bytes on a proxied pair (client <-> backend) for one user; mirrors BkTraffic.meter. */
   function meter(id, client, backend) {
+    stamp(id, 's');
     const kill = () => {
       for (const s of [client, backend]) {
         try { if (s.destroy) s.destroy(); } catch (_) {}
@@ -4369,6 +4477,7 @@ const BkUsers = (() => {
       usedBytes: u.usedBytes || 0,
       expiresAt: u.expiresAt || 0, enabled: u.enabled !== false,
       allowed: isAllowed(u), createdAt: u.createdAt || 0,
+      lastSeenAt: u.lastSeenAt || 0, lastActiveAt: u.lastActiveAt || 0,
       sub: '/u/' + u.token
     };
   }
@@ -4402,13 +4511,18 @@ const BkUsers = (() => {
       const sig = () => [defaultUuid].concat(data.users.filter(isAllowed).map(u => u.uuid)).join(',');
       const before = sig();
       const oldAllowed = new Map(data.users.filter(isAllowed).map(u => [u.id, u]));
-      data.users = (remoteUsers || []).map(u => ({
-        id: u.id, tag: u.tag, name: u.name, uuid: u.uuid, token: u.token || '',
-        quotaBytes: u.quotaBytes || 0,
-        usedBytes: (u.usedBytes || 0) + (pend[u.id] || 0),
-        expiresAt: u.expiresAt || 0, enabled: u.enabled !== false,
-        createdAt: u.createdAt || 0, _wasAllowed: true
-      }));
+      data.users = (remoteUsers || []).map(u => {
+        const prev = find(u.id);
+        return {
+          id: u.id, tag: u.tag, name: u.name, uuid: u.uuid, token: u.token || '',
+          quotaBytes: u.quotaBytes || 0,
+          usedBytes: (u.usedBytes || 0) + (pend[u.id] || 0),
+          expiresAt: u.expiresAt || 0, enabled: u.enabled !== false,
+          createdAt: u.createdAt || 0, _wasAllowed: true,
+          lastSeenAt: Math.max(u.lastSeenAt || 0, prev ? (prev.lastSeenAt || 0) : 0),
+          lastActiveAt: Math.max(u.lastActiveAt || 0, prev ? (prev.lastActiveAt || 0) : 0)
+        };
+      });
       for (const u of data.users) u._wasAllowed = isAllowed(u);
       if (mainUuid) defaultUuid = mainUuid;
       for (const [id, ou] of oldAllowed) {
@@ -4424,6 +4538,52 @@ const BkUsers = (() => {
       for (const u of data.users) if (isAllowed(u) && !out.includes(u.uuid)) out.push(u.uuid);
       return out;
     },
+    /** Like activeUuids, but with the log identity (tag / 'owner') per UUID so
+     *  engine configs can name each user and access logs can be attributed. */
+    activeEntries() {
+      const out = [];
+      if (defaultUuid) out.push({ uuid: defaultUuid, tag: 'owner' });
+      for (const u of data.users) if (isAllowed(u) && !out.some(e => e.uuid === u.uuid)) out.push({ uuid: u.uuid, tag: u.tag });
+      return out;
+    },
+    /** Engine log identity (user tag, 'owner', or a raw UUID) -> user id / 'owner' / null. */
+    idForName(name) {
+      const n = String(name || '');
+      if (!n) return null;
+      if (n === 'owner') return 'owner';
+      const byTag = findByTag(n);
+      if (byTag) return byTag.id;
+      if (defaultUuid && n === defaultUuid) return 'owner';
+      const byUuid = data.users.find(u => u.uuid === n);
+      return byUuid ? byUuid.id : null;
+    },
+    /** Merge node-reported last-seen / last-active stamps into a user record. */
+    applySeen(id, s, a) {
+      const u = find(id);
+      if (!u) return;
+      let changed = false;
+      if (s && s > (u.lastSeenAt || 0)) { u.lastSeenAt = s; changed = true; }
+      if (a && a > (u.lastActiveAt || 0)) { u.lastActiveAt = a; changed = true; }
+      if (changed) saveSoon();
+    },
+    /** Drain the pending stamp map (node agent reports it to the main panel). */
+    takeSeen() {
+      const out = {};
+      for (const id of Object.keys(seenPending)) {
+        const p = seenPending[id];
+        if (p.s || p.a) out[id] = { s: p.s || 0, a: p.a || 0 };
+        delete seenPending[id];
+      }
+      return out;
+    },
+    /** Put drained stamps back when a node report fails (max-merge). */
+    mergeSeen(map) {
+      for (const id of Object.keys(map || {})) {
+        const p = seenPending[id] || (seenPending[id] = { s: 0, a: 0 });
+        if ((map[id].s || 0) > p.s) p.s = map[id].s;
+        if ((map[id].a || 0) > p.a) p.a = map[id].a;
+      }
+    },
     create(opts) {
       const o = opts || {};
       const id = crypto.randomBytes(4).toString('hex');
@@ -4434,7 +4594,8 @@ const BkUsers = (() => {
         token: crypto.randomBytes(18).toString('base64url'),
         quotaBytes: o.quotaGB > 0 ? Math.round(o.quotaGB * GIB) : 0,
         expiresAt: o.days > 0 ? Date.now() + Math.round(o.days * DAY) : 0,
-        usedBytes: 0, enabled: true, createdAt: Date.now(), _wasAllowed: true
+        usedBytes: 0, enabled: true, createdAt: Date.now(), _wasAllowed: true,
+        lastSeenAt: 0, lastActiveAt: 0
       };
       data.users.push(u);
       save();
@@ -4467,6 +4628,152 @@ const BkUsers = (() => {
 })();
 
 // ===== BkNodes: registry of remote Plasma nodes (main panel side) =====
+// ===== BkActivity: per-user connection history (time + destination host) =====
+// Events are distilled from engine logs (sing-box stdout, Xray access log):
+// one compact JSON line per connection in activity.jsonl. Storage is hard
+// capped so the disk can never fill up: at most ~3 MB and 14 days are kept
+// (pruned on boot, every 6 hours, and whenever the file grows past the cap),
+// plus a per-user cap. On node servers events are queued in memory (bounded)
+// and shipped to the main panel with the usage report; only the main stores.
+const BkActivity = (() => {
+  const MAX_BYTES = 3 * 1024 * 1024;
+  const MAX_AGE = 14 * 86400000;
+  const KEEP_PER_USER = 4000;
+  const OUTBOX_CAP = 300;
+  let file = null;
+  let isMain = true;
+  let buf = [];
+  let flushTimer = null;
+  let outbox = [];
+
+  function clean(ev) {
+    if (!ev || typeof ev !== 'object') return null;
+    const t = Math.floor(Number(ev.t) || 0);
+    const u = String(ev.u || '').slice(0, 64);
+    let h = String(ev.h || '').slice(0, 253);
+    const at = h.indexOf('@'); if (at >= 0) h = h.slice(at + 1);
+    const sl = h.indexOf('/'); if (sl >= 0) h = h.slice(0, sl);
+    const p = Math.floor(Number(ev.p) || 0);
+    const n = String(ev.n || '').slice(0, 24);
+    if (!t || !u || !h) return null;
+    return { t, u, h, p: p >= 0 && p <= 65535 ? p : 0, n };
+  }
+  function flush() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (!file || !buf.length) { buf = []; return; }
+    const lines = buf.map(e => JSON.stringify(e)).join('\n') + '\n';
+    buf = [];
+    try {
+      fs.appendFileSync(file, lines, 'utf8');
+      if (fs.statSync(file).size > MAX_BYTES) prune();
+    } catch (_) {}
+  }
+  function scheduleFlush() {
+    if (flushTimer) return;
+    flushTimer = setTimeout(flush, 2000);
+    if (flushTimer.unref) flushTimer.unref();
+  }
+  function prune() {
+    if (!file) return;
+    let raw = '';
+    try { raw = fs.readFileSync(file, 'utf8'); } catch (_) { return; }
+    const cutoff = Date.now() - MAX_AGE;
+    const kept = [];
+    for (const line of raw.split('\n')) {
+      if (!line) continue;
+      let e = null;
+      try { e = JSON.parse(line); } catch (_) { continue; }
+      if (!e || !e.t || e.t < cutoff) continue;
+      kept.push(e);
+    }
+    kept.sort((a, b) => a.t - b.t);
+    const perUser = {};
+    let bytes = 0;
+    const out = [];
+    for (let i = kept.length - 1; i >= 0; i--) {
+      const e = kept[i];
+      perUser[e.u] = (perUser[e.u] || 0) + 1;
+      if (perUser[e.u] > KEEP_PER_USER) continue;
+      const sz = JSON.stringify(e).length + 1;
+      if (bytes + sz > MAX_BYTES) continue;
+      bytes += sz;
+      out.push(e);
+    }
+    out.reverse();
+    try {
+      const tmp = file + '.tmp';
+      fs.writeFileSync(tmp, out.map(e => JSON.stringify(e)).join('\n') + (out.length ? '\n' : ''), 'utf8');
+      fs.renameSync(tmp, file);
+    } catch (_) {}
+  }
+  function readAll() {
+    if (!file) return [];
+    let raw = '';
+    try { raw = fs.readFileSync(file, 'utf8'); } catch (_) { return []; }
+    const out = [];
+    for (const line of raw.split('\n')) {
+      if (!line) continue;
+      try { const e = JSON.parse(line); if (e && e.t) out.push(e); } catch (_) {}
+    }
+    return out;
+  }
+  return {
+    init(dataDir, main) {
+      isMain = !!main;
+      if (isMain) {
+        file = path.join(dataDir, 'activity.jsonl');
+        prune();
+        const t = setInterval(prune, 6 * 3600000);
+        if (t.unref) t.unref();
+      }
+    },
+    record(ev) {
+      const e = clean(ev);
+      if (!e) return;
+      if (!isMain) {
+        outbox.push(e);
+        if (outbox.length > OUTBOX_CAP) outbox.splice(0, outbox.length - OUTBOX_CAP);
+        return;
+      }
+      buf.push(e);
+      if (buf.length >= 100) flush(); else scheduleFlush();
+    },
+    /** Main only: store events reported by a node. */
+    ingest(list) {
+      if (!isMain || !Array.isArray(list)) return;
+      for (const ev of list.slice(0, 1000)) {
+        const e = clean(ev);
+        if (e) buf.push(e);
+      }
+      if (buf.length) { if (buf.length >= 100) flush(); else scheduleFlush(); }
+    },
+    peekOutbox() { return outbox.slice(); },
+    clearOutbox(n) { outbox.splice(0, n); },
+    query(opts) {
+      const o = opts || {};
+      const from = Math.floor(Number(o.from) || 0);
+      const to = Math.floor(Number(o.to) || 0) || Date.now();
+      const q = String(o.q || '').toLowerCase();
+      const limit = Math.min(1000, Math.max(1, Math.floor(Number(o.limit) || 300)));
+      const all = readAll();
+      const rows = [];
+      const hosts = {};
+      let total = 0;
+      for (let i = all.length - 1; i >= 0; i--) {
+        const e = all[i];
+        if (o.userId && e.u !== o.userId) continue;
+        if (e.t < from || e.t > to) continue;
+        hosts[e.h] = (hosts[e.h] || 0) + 1;
+        if (q && String(e.h).toLowerCase().indexOf(q) < 0) continue;
+        total++;
+        if (rows.length < limit) rows.push(e);
+      }
+      const top = Object.keys(hosts).map(h => ({ h, c: hosts[h] })).sort((a, b) => b.c - a.c).slice(0, 10);
+      return { rows, total, top };
+    }
+  };
+})();
+
 const BkNodes = (() => {
   let file = null;
   let data = { nodes: [] };
@@ -4525,7 +4832,8 @@ function bkSubPageHtml(view, nodes, subUrl) {
   const viewJson = JSON.stringify({
     name: v.name || 'Plasma', statusText, statusCls,
     quotaBytes: v.quotaBytes || 0, usedBytes: v.usedBytes || 0,
-    expiresAt: v.expiresAt || 0, createdAt: v.createdAt || 0, allowed: !!v.allowed
+    expiresAt: v.expiresAt || 0, createdAt: v.createdAt || 0, allowed: !!v.allowed,
+    lastSeenAt: v.lastSeenAt || 0, lastActiveAt: v.lastActiveAt || 0
   }).replace(/</g, '\\u003c');
   const cfgJson = JSON.stringify((nodes || []).map(n => ({ name: n.name || '', type: n.type || '', uri: n.uri || '' })).filter(n => n.uri)).replace(/</g, '\\u003c');
   const subJson = JSON.stringify({ main: subUrl, raw: subUrl + '/raw', clash: subUrl + '/clash', sb: subUrl + '/sb' }).replace(/</g, '\\u003c');
@@ -4608,6 +4916,8 @@ button.green{background:linear-gradient(120deg,#0ea873,#2ecc71);width:100%;paddi
 <div class="tile"><div class="k">زمان باقی‌مانده</div><div class="val" id="expLeft">—</div></div>
 <div class="tile"><div class="k">تاریخ انقضا</div><div class="val" id="expD">—</div></div>
 <div class="tile"><div class="k">تاریخ ساخت</div><div class="val" id="crD">—</div></div>
+<div class="tile"><div class="k">آخرین آنلاین شدن</div><div class="val" id="lastOn">—</div></div>
+<div class="tile"><div class="k">آخرین فعالیت</div><div class="val" id="lastAct">—</div></div>
 </div></div></div>
 <div id="linksZone"></div>
 <div class="card"><h3>راهنمای اتصال</h3><div class="steps">
@@ -4655,6 +4965,8 @@ function linkRow(url, label){
   document.getElementById('expD').textContent = VIEW.expiresAt ? fmtDate(VIEW.expiresAt) : 'بدون انقضا ∞';
   document.getElementById('expLeft').textContent = !VIEW.expiresAt ? 'نامحدود' : (function(){ var d=Math.ceil((VIEW.expiresAt-Date.now())/86400000); return d>0 ? d+' روز' : 'تمام شده'; })();
   document.getElementById('crD').textContent = VIEW.createdAt ? fmtDate(VIEW.createdAt) : '—';
+  document.getElementById('lastOn').textContent = VIEW.lastSeenAt ? fmtDate(VIEW.lastSeenAt) : '—';
+  document.getElementById('lastAct').textContent = VIEW.lastActiveAt ? fmtDate(VIEW.lastActiveAt) : '—';
   var z=document.getElementById('linksZone');
   if(!VIEW.allowed){
     z.appendChild(el('div','warn','این اشتراک در حال حاضر فعال نیست ('+VIEW.statusText+'). برای فعال‌سازی با پشتیبانی در تماس باشید.'));
@@ -4835,6 +5147,42 @@ label{font-size:12px;color:#93a0b8;display:block;margin-bottom:5px}
 </div>
 <div id="toast">کپی شد!</div>
 <div id="qrM"><div class="box"><div class="t" id="qrT"></div><img id="qrI" width="230" height="230" alt="QR"><div style="margin-top:14px"><button class="soft" onclick="closeQr()">بستن</button></div></div></div>
+<style>
+.bkM{position:fixed;inset:0;background:rgba(3,5,12,.82);display:none;align-items:center;justify-content:center;z-index:60;padding:14px}
+.bkM.open{display:flex}
+.bkM .box{background:#101736;border:1px solid rgba(150,140,255,.3);border-radius:20px;padding:22px;max-width:340px;width:100%;text-align:right;max-height:88vh;overflow:auto}
+.bkM .box.wide{max-width:640px}
+.bkM .t{margin-bottom:12px;font-weight:700;font-size:14px;word-break:break-all}
+.bkM .fld{display:block;font-size:12px;color:#9fb2e8;margin-bottom:10px}
+.bkM .fld input{display:block;width:100%;margin-top:5px;background:#0a0f22;border:1px solid #2c3a63;border-radius:10px;color:#eef0ff;padding:8px 10px;font-family:inherit;box-sizing:border-box}
+.repRow{display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid rgba(150,140,255,.12);font-size:12.5px;align-items:baseline}
+.repRow .h{flex:1;direction:ltr;text-align:left;font-family:monospace;word-break:break-all}
+.chip{display:inline-block;background:rgba(255,255,255,.07);border:1px solid rgba(150,140,255,.25);border-radius:999px;padding:3px 10px;margin:2px;font-size:11.5px;direction:ltr}
+</style>
+<div id="setM" class="bkM"><div class="box">
+<div class="t" id="setT">تنظیم اشتراک</div>
+<div class="mut" id="setCur" style="margin-bottom:10px"></div>
+<label class="fld">حجم کل (GB) — ۰ یعنی نامحدود<input id="setGb" type="number" min="0" step="any" placeholder="خالی = بدون تغییر"></label>
+<label class="fld">مهلت از الان (روز) — ۰ یعنی بدون انقضا<input id="setDays" type="number" min="0" step="any" placeholder="خالی = بدون تغییر"></label>
+<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+<button onclick="saveSettings()">ذخیره</button>
+<button class="soft" onclick="document.getElementById('setGb').value='0'">حجم نامحدود</button>
+<button class="soft" onclick="document.getElementById('setDays').value='0'">بدون انقضا</button>
+<button class="soft" onclick="closeSettings()">بستن</button>
+</div></div></div>
+<div id="repM" class="bkM"><div class="box wide">
+<div class="t" id="repT">گزارش فعالیت</div>
+<div class="mut" id="repMeta" style="margin-bottom:10px"></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
+<label class="fld" style="flex:1;min-width:150px">جست‌وجو در سایت‌ها<input id="repQ" type="text" placeholder="example.com"></label>
+<label class="fld">از<input id="repFrom" type="datetime-local"></label>
+<label class="fld">تا<input id="repTo" type="datetime-local"></label>
+<button onclick="loadReport()">نمایش</button>
+<button class="soft" onclick="closeReport()">بستن</button>
+</div>
+<div id="repSum" style="margin:12px 0"></div>
+<div id="repList"></div>
+</div></div>
 <script>
 var PREFIX = location.pathname.replace(/\\/users\\/?$/, '');
 var API = PREFIX + '/api/users';
@@ -4864,7 +5212,7 @@ function render(){ var q=(document.getElementById('q').value||'').toLowerCase();
  var status = !u.enabled ? '<span class="badge off">غیرفعال</span>' : (u.allowed ? '<span class="badge ok">فعال</span>' : '<span class="badge end">'+(expired?'منقضی':'تمام‌شده')+'</span>');
  var sub = location.origin + u.sub;
  tr.innerHTML = '<td></td><td></td><td></td><td></td><td class="links"></td><td></td>';
- tr.children[0].innerHTML = '<b>'+esc(u.name)+'</b><div class="mut">'+esc(u.tag)+'</div>';
+ tr.children[0].innerHTML = '<b>'+esc(u.name)+'</b><div class="mut">'+esc(u.tag)+'</div>' + (u.lastActiveAt ? '<div class="mut">آخرین فعالیت: '+fmtAgo(u.lastActiveAt)+'</div>' : '');
  tr.children[1].innerHTML = (u.quotaBytes ? '<div class="bar"><i class="'+(pct>=80?'hot':'')+'" style="width:'+pct+'%"></i></div><div class="mut">'+fmtBytes(u.usedBytes)+' از '+fmtBytes(u.quotaBytes)+' ('+pct+'٪)</div>' : '<div>'+fmtBytes(u.usedBytes)+' مصرف</div><div class="mut">حجم نامحدود</div>');
  tr.children[2].innerHTML = fmtDate(u.expiresAt)+'<div class="mut">'+daysLeft(u.expiresAt)+'</div>';
  tr.children[3].innerHTML = status;
@@ -4877,6 +5225,8 @@ function render(){ var q=(document.getElementById('q').value||'').toLowerCase();
  c.appendChild(btn('کپی Sing-box', function(){ copyText(sub+'/sb'); }, 'soft'));
  c.appendChild(btn('تمدید', function(){ var v=prompt('چند روز تمدید شود؟','30'); if(v) post(u.id+'/extend',{days:parseFloat(v)||0}); }));
  c.appendChild(btn('افزودن حجم', function(){ var v=prompt('چند GB اضافه شود؟','10'); if(v) post(u.id+'/add-volume',{gb:parseFloat(v)||0}); }, 'soft'));
+ c.appendChild(btn('تنظیم', function(){ openSettings(u); }));
+ c.appendChild(btn('گزارش فعالیت', function(){ openReport(u); }, 'soft'));
  c.appendChild(btn('ریست مصرف', function(){ if(confirm('مصرف این اشتراک صفر شود؟')) post(u.id+'/reset',{}); }, 'soft'));
  c.appendChild(btn(u.enabled?'غیرفعال':'فعال', function(){ post(u.id+'/toggle',{}); }, 'soft'));
  c.appendChild(btn('حذف', function(){ if(confirm('این اشتراک حذف شود؟')) post(u.id+'/delete',{}); }, 'red'));
@@ -4885,6 +5235,16 @@ function mkLink(t,href){ var a=document.createElement('a'); a.href=href; a.textC
 function btn(t,f,cls){ var b=document.createElement('button'); b.textContent=t; if(cls)b.className=cls; b.onclick=f; return b; }
 function post(path, body){ fetch(API+'/'+path,{method:'POST',headers:H(),body:JSON.stringify(body||{})}).then(function(){ load(); }); }
 function exportAll(){ if(!ALL.length){ toast('اشتراکی نیست'); return; } var lines=ALL.map(function(u){ return u.name+': '+location.origin+u.sub; }); copyText(lines.join('\\n'), 'لینک همه اشتراک‌ها کپی شد ('+ALL.length+')'); }
+var SET_ID=null, REP_ID=null;
+function fmtDT(t){ return t ? new Date(t).toLocaleString('fa-IR') : '—'; }
+function openSettings(u){ SET_ID=u.id; document.getElementById('setT').textContent='تنظیم اشتراک «'+u.name+'»'; document.getElementById('setCur').textContent='حجم فعلی: '+(u.quotaBytes?fmtBytes(u.quotaBytes):'نامحدود')+' — انقضا: '+(u.expiresAt?fmtDate(u.expiresAt):'بدون انقضا'); document.getElementById('setGb').value=''; document.getElementById('setDays').value=''; document.getElementById('setM').classList.add('open'); }
+function closeSettings(){ document.getElementById('setM').classList.remove('open'); }
+function saveSettings(){ var body={}; var g=document.getElementById('setGb').value; var d=document.getElementById('setDays').value; if(g!=='') body.quotaGB=parseFloat(g)||0; if(d!=='') body.days=parseFloat(d)||0; if(!Object.keys(body).length){ toast('چیزی وارد نشده'); return; } closeSettings(); post(SET_ID+'/update', body); toast('ذخیره شد'); }
+function openReport(u){ REP_ID=u.id; document.getElementById('repT').textContent='گزارش فعالیت «'+u.name+'»'; document.getElementById('repMeta').textContent='آخرین آنلاین شدن: '+(u.lastSeenAt?(fmtDT(u.lastSeenAt)+' ('+fmtAgo(u.lastSeenAt)+')'):'—')+' — آخرین فعالیت: '+(u.lastActiveAt?(fmtDT(u.lastActiveAt)+' ('+fmtAgo(u.lastActiveAt)+')'):'—'); document.getElementById('repQ').value=''; document.getElementById('repFrom').value=''; document.getElementById('repTo').value=''; document.getElementById('repM').classList.add('open'); loadReport(); }
+function closeReport(){ document.getElementById('repM').classList.remove('open'); }
+function loadReport(){ var q=document.getElementById('repQ').value||''; var f=document.getElementById('repFrom').value; var t=document.getElementById('repTo').value; var url=API+'/'+REP_ID+'/activity?limit=300'; if(q) url+='&q='+encodeURIComponent(q); if(f) url+='&from='+new Date(f).getTime(); if(t) url+='&to='+new Date(t).getTime(); document.getElementById('repList').innerHTML='<div class="mut">در حال بارگذاری…</div>'; fetch(url,{headers:H()}).then(function(r){return r.json();}).then(function(j){ var tops=(j.top||[]).map(function(x){ return '<span class="chip">'+esc(x.h)+' ×'+x.c+'</span>'; }).join(''); document.getElementById('repSum').innerHTML='<div class="mut">تعداد اتصال در این بازه: '+(j.total||0)+'</div>'+(tops?'<div style="margin-top:6px">پرتکرارترین‌ها: '+tops+'</div>':''); var L=document.getElementById('repList'); if(!(j.rows||[]).length){ L.innerHTML='<div class="mut">موردی نیست</div>'; return; } L.innerHTML=j.rows.map(function(e){ return '<div class="repRow"><span>'+fmtDT(e.t)+'</span><span class="h">'+esc(e.h)+(e.p?':'+e.p:'')+'</span><span class="mut">'+esc(e.n||'')+'</span></div>'; }).join(''); }).catch(function(){ document.getElementById('repList').innerHTML='<div class="mut">خطا در بارگذاری</div>'; }); }
+document.getElementById('setM').addEventListener('click', function(e){ if(e.target===this) closeSettings(); });
+document.getElementById('repM').addEventListener('click', function(e){ if(e.target===this) closeReport(); });
 function createUser(){ var name=document.getElementById('n').value; var g=parseFloat(document.getElementById('g').value)||0; var d=parseFloat(document.getElementById('d').value)||0; fetch(API,{method:'POST',headers:H(),body:JSON.stringify({name:name,quotaGB:g,days:d})}).then(function(r){return r.json();}).then(function(j){ document.getElementById('n').value=''; if(j && j.user){ var sub=location.origin+j.user.sub; var box=document.getElementById('createResult'); box.style.display='block'; var L=document.getElementById('createLinks'); L.innerHTML=''; L.appendChild(btn('کپی لینک اشتراک', function(){ copyText(sub); })); L.appendChild(btn('صفحه اشتراک', function(){ window.open(sub+'/page','_blank'); }, 'soft')); L.appendChild(btn('QR', function(){ openQr(sub, 'اشتراک '+j.user.name); }, 'soft')); var nm=document.createElement('span'); nm.className='mut'; nm.textContent=' «'+j.user.name+'» '; L.appendChild(nm); } load(); }); }
 document.getElementById('q').addEventListener('input', render);
 document.getElementById('f').addEventListener('change', render);
@@ -5562,6 +5922,7 @@ async function startGate(userConfig = {}) {
   const stateMgr = new StateManager(config.paths, config);
   const state = stateMgr.loadOrCreate();
   BkUsers.init(config.paths.dataDir);
+  BkActivity.init(config.paths.dataDir, (process.env.PLASMA_ROLE || '').toLowerCase() !== 'node');
   BkUsers.setDefaultUuid(state.uuid);
   BkNodes.init(config.paths.dataDir);
   Logger.item('UUID', bkMask(state.uuid) + (process.env.UUID || process.env.SB_UUID ? ' (from env)' : ' (saved/generated; set UUID to pin it)'));
@@ -5714,13 +6075,19 @@ async function startGate(userConfig = {}) {
       };
       const nodeReport = async () => {
         const ids = Object.keys(pending).filter(id => pending[id] > 0);
-        if (!ids.length) return;
+        const seen = BkUsers.takeSeen();
+        const acts = BkActivity.peekOutbox();
+        if (!ids.length && !Object.keys(seen).length && !acts.length) return;
         const snap = {};
         for (const id of ids) snap[id] = pending[id];
         try {
-          await nodeCall('POST', '/api/node/usage', { deltas: snap });
+          await nodeCall('POST', '/api/node/usage', { deltas: snap, seen, acts });
           for (const id of ids) { pending[id] -= snap[id]; if (pending[id] <= 0) delete pending[id]; }
-        } catch (e) { Logger.warn('Node agent: usage report failed: ' + e.message); }
+          BkActivity.clearOutbox(acts.length);
+        } catch (e) {
+          BkUsers.mergeSeen(seen);
+          Logger.warn('Node agent: usage report failed: ' + e.message);
+        }
       };
       Logger.section('Plasma Node');
       Logger.item('Main panel', nodeMain);
